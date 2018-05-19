@@ -1,6 +1,6 @@
 [package]
 name = "pidlock"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Paul Hummer <paul@eventuallyanyway.com>"]
 license = "MIT"
 description = "A library for using pidfiles as resource locks"
