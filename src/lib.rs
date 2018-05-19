@@ -56,7 +56,7 @@ impl Pidlock {
                 return Err(PidlockError::LockExists);
             }
         };
-        file.write(&format!("{}", self.pid).into_bytes()[..])
+        file.write_all(&format!("{}", self.pid).into_bytes()[..])
             .unwrap();
 
         self.state = PidlockState::Acquired;
