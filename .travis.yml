@@ -8,3 +8,5 @@ matrix:
   allow_failures:
     - rust: beta
     - rust: nightly
+env:
+  - RUST_TEST_THREADS=1
