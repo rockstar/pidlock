@@ -19,6 +19,7 @@ include = [
 
 [dependencies]
 libc = "0.2.40"
+log = "0.4.1"
 
 [badges]
 travis-ci = { repository = "rockstar/pidlock" }

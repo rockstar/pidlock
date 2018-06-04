@@ -1,7 +1,9 @@
 extern crate libc;
+#[macro_use]
+extern crate log;
 
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 
 #[derive(Debug, PartialEq)]
 pub enum PidlockError {
@@ -22,6 +24,16 @@ fn getpid() -> u32 {
     unsafe { libc::getpid() as u32 }
 }
 
+fn process_exists(pid: i32) -> bool {
+    // From the POSIX standard: If sig is 0 (the null signal), error checking
+    // is performed but no signal is actually sent. The null signal can be
+    // used to check the validity of pid.
+    unsafe {
+        let result = libc::kill(pid, 0);
+        result == 0
+    }
+}
+
 pub struct Pidlock {
     pid: u32,
     path: String,
@@ -37,6 +49,26 @@ impl Pidlock {
         }
     }
 
+    fn check_stale(&self) {
+        match fs::OpenOptions::new().read(true).open(self.path.clone()) {
+            Ok(mut file) => {
+                let mut contents = String::new();
+                file.read_to_string(&mut contents).unwrap();
+
+                match contents.trim().parse::<i32>() {
+                    Ok(pid) => {
+                        if !process_exists(pid) {
+                            warn!("Removing stale pid file at {}", self.path);
+                            fs::remove_file(&self.path).unwrap();
+                        }
+                    }
+                    Err(_) => fs::remove_file(&self.path).unwrap(),
+                }
+            }
+            Err(_) => {}
+        };
+    }
+
     pub fn acquire(&mut self) -> PidlockResult {
         match self.state {
             PidlockState::New => {}
@@ -44,11 +76,11 @@ impl Pidlock {
                 return Err(PidlockError::InvalidState);
             }
         }
+        self.check_stale();
 
         let mut file = match fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .read(true)
             .open(self.path.clone())
         {
             Ok(file) => file,
