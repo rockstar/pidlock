@@ -50,23 +50,20 @@ impl Pidlock {
     }
 
     fn check_stale(&self) {
-        match fs::OpenOptions::new().read(true).open(self.path.clone()) {
-            Ok(mut file) => {
-                let mut contents = String::new();
-                file.read_to_string(&mut contents).unwrap();
+        if let Ok(mut file) = fs::OpenOptions::new().read(true).open(self.path.clone()) {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).unwrap();
 
-                match contents.trim().parse::<i32>() {
-                    Ok(pid) => {
-                        if !process_exists(pid) {
-                            warn!("Removing stale pid file at {}", self.path);
-                            fs::remove_file(&self.path).unwrap();
-                        }
+            match contents.trim().parse::<i32>() {
+                Ok(pid) => {
+                    if !process_exists(pid) {
+                        warn!("Removing stale pid file at {}", self.path);
+                        fs::remove_file(&self.path).unwrap();
                     }
-                    Err(_) => fs::remove_file(&self.path).unwrap(),
                 }
+                Err(_) => fs::remove_file(&self.path).unwrap(),
             }
-            Err(_) => {}
-        };
+        }
     }
 
     pub fn acquire(&mut self) -> PidlockResult {
