@@ -10,7 +10,7 @@ Usage
 extern crate pidlock;
 
 fn main() {
-    let mut lock = pidlock::Pidlock("/path/to/pidfile.pid");
+    let mut lock = pidlock::Pidlock::new("/path/to/pidfile.pid");
     lock.acquire().unwrap();
 
     ...
