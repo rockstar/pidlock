@@ -66,6 +66,10 @@ impl Pidlock {
         }
     }
 
+    pub fn state(&self) -> &PidlockState {
+        &self.state
+    }
+
     pub fn acquire(&mut self) -> PidlockResult {
         match self.state {
             PidlockState::New => {}
