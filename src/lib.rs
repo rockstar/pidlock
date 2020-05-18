@@ -14,7 +14,7 @@ pub enum PidlockError {
 type PidlockResult = Result<(), PidlockError>;
 
 #[derive(Debug, PartialEq)]
-enum PidlockState {
+pub enum PidlockState {
     New,
     Acquired,
     Released,
