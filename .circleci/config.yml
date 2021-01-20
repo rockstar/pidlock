@@ -6,6 +6,8 @@ jobs:
       - image: rust:latest
     steps:
       - checkout
+      - restore_cache:
+          key: pidlock-cache
       - run:
           name: Install clippy, rustfmt and cargo-deny
           command: |
@@ -24,3 +26,7 @@ jobs:
       - run:
           name: check deny
           command: cargo deny check
+      - save_cache:
+          key: pidlock-cache
+          paths:
+            - "~/.cargo"
