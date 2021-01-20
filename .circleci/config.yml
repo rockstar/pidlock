@@ -1,0 +1,26 @@
+version: 2
+
+jobs:
+  build:
+    docker:
+      - image: rust:latest
+    steps:
+      - checkout
+      - run:
+          name: Install clippy, rustfmt and cargo-deny
+          command: |
+            rustup component add clippy
+            rustup component add rustfmt
+            cargo install cargo-deny
+      - run:
+          name: test
+          command: cargo test
+      - run:
+          name: clippy
+          command: cargo clippy
+      - run:
+          name: check format
+          command: cargo fmt -- --check
+      - run:
+          name: check deny
+          command: cargo deny check

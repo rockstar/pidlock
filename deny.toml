@@ -1,0 +1,7 @@
+[licenses]
+copyleft = "deny"
+unlicensed = "deny"
+
+allow = [
+    "MIT",
+]
