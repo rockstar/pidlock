@@ -25,4 +25,4 @@ log = "0.4.1"
 rand = "0.8.2"
 
 [badges]
-travis-ci = { repository = "rockstar/pidlock" }
+circle-ci = { repository = "rockstar/pidlock", branch = "master" }
