@@ -16,6 +16,9 @@ include = [
     "LICENSE-APACHE",
 ]
 
+[features]
+default = ["strict"]
+strict = []  # Warnings are errors
 
 [dependencies]
 libc = "0.2.40"
