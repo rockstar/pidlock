@@ -1,6 +1,8 @@
 extern crate libc;
 #[macro_use]
 extern crate log;
+#[cfg(test)]
+extern crate rand;
 
 use std::fs;
 use std::io::{Read, Write};
@@ -114,23 +116,34 @@ impl Pidlock {
 
 #[cfg(test)]
 mod tests {
+    use rand::distributions::Alphanumeric;
+    use rand::{thread_rng, Rng};
+
     use super::{getpid, PidlockState};
     use super::{Pidlock, PidlockError};
 
-    const TEST_PID: &str = "/tmp/test.pid";
+    fn make_pid_path() -> String {
+        let rand_string: String = thread_rng()
+            .sample_iter(&Alphanumeric)
+            .take(10)
+            .map(char::from)
+            .collect();
+        format!("/tmp/test.{}.pid", rand_string).to_string()
+    }
 
     #[test]
     fn test_new() {
-        let pidfile = Pidlock::new(TEST_PID);
+        let pid_path = make_pid_path();
+        let pidfile = Pidlock::new(&pid_path);
 
         assert_eq!(pidfile.pid, getpid());
-        assert_eq!(pidfile.path, "/tmp/test.pid".to_string());
+        assert_eq!(pidfile.path, pid_path);
         assert_eq!(pidfile.state, PidlockState::New);
     }
 
     #[test]
     fn test_acquire_and_release() {
-        let mut pidfile = Pidlock::new(TEST_PID);
+        let mut pidfile = Pidlock::new(&make_pid_path());
         pidfile.acquire().unwrap();
 
         assert_eq!(pidfile.state, PidlockState::Acquired);
@@ -142,10 +155,10 @@ mod tests {
 
     #[test]
     fn test_acquire_lock_exists() {
-        let mut orig_pidfile = Pidlock::new(TEST_PID);
+        let mut orig_pidfile = Pidlock::new(&make_pid_path());
         orig_pidfile.acquire().unwrap();
 
-        let mut pidfile = Pidlock::new(TEST_PID);
+        let mut pidfile = Pidlock::new(&orig_pidfile.path);
         match pidfile.acquire() {
             Err(err) => {
                 orig_pidfile.release().unwrap();
@@ -160,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_acquire_already_acquired() {
-        let mut pidfile = Pidlock::new(TEST_PID);
+        let mut pidfile = Pidlock::new(&make_pid_path());
         pidfile.acquire().unwrap();
         match pidfile.acquire() {
             Err(err) => {
@@ -176,7 +189,7 @@ mod tests {
 
     #[test]
     fn test_release_bad_state() {
-        let mut pidfile = Pidlock::new(TEST_PID);
+        let mut pidfile = Pidlock::new(&make_pid_path());
         match pidfile.release() {
             Err(err) => {
                 assert_eq!(err, PidlockError::InvalidState);
@@ -189,14 +202,14 @@ mod tests {
 
     #[test]
     fn test_locked() {
-        let mut pidfile = Pidlock::new(TEST_PID);
+        let mut pidfile = Pidlock::new(&make_pid_path());
         pidfile.acquire().unwrap();
         assert!(pidfile.locked());
     }
 
     #[test]
     fn test_locked_not_locked() {
-        let pidfile = Pidlock::new(TEST_PID);
+        let pidfile = Pidlock::new(&make_pid_path());
         assert!(!pidfile.locked());
     }
 }
