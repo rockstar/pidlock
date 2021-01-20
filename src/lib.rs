@@ -7,21 +7,35 @@ extern crate rand;
 use std::io::{Read, Write};
 use std::{fs, process};
 
+/// Errors that may occur during the `Pidlock` lifetime.
 #[derive(Debug, PartialEq)]
 pub enum PidlockError {
+    #[doc = "A lock already exists"]
     LockExists,
+    #[doc = "An operation was attempted in the wrong state, e.g. releasing before acquiring."]
     InvalidState,
 }
 
+/// A result from a Pidlock operation
 type PidlockResult = Result<(), PidlockError>;
 
+/// States a Pidlock can be in during its lifetime.
 #[derive(Debug, PartialEq)]
 enum PidlockState {
+    #[doc = "A new pidlock, unacquired"]
     New,
+    #[doc = "A lock is acquired"]
     Acquired,
+    #[doc = "A lock is released"]
     Released,
 }
 
+/// Check whether a process exists, used to determine whether a pid file is stale.
+///
+/// # Safety
+///
+/// This function uses unsafe methods to determine process existence. The function
+/// itself is private, and the input is validated prior to call.
 fn process_exists(pid: i32) -> bool {
     // From the POSIX standard: If sig is 0 (the null signal), error checking
     // is performed but no signal is actually sent. The null signal can be
@@ -32,13 +46,19 @@ fn process_exists(pid: i32) -> bool {
     }
 }
 
+/// A pid-centered lock. A lock is considered "acquired" when a file exists on disk
+/// at the path specified, containing the process id of the locking process.
 pub struct Pidlock {
+    #[doc = "The current process id"]
     pid: u32,
+    #[doc = "A path to the lock file"]
     path: String,
+    #[doc = "Current state of the Pidlock"]
     state: PidlockState,
 }
 
 impl Pidlock {
+    /// Create a new Pidlock at the provided path.
     pub fn new(path: &str) -> Self {
         Pidlock {
             pid: process::id(),
@@ -47,6 +67,8 @@ impl Pidlock {
         }
     }
 
+    /// Check whether a lock file already exists, and if it does, whether the
+    /// specified pid is still a valid process id on the system.
     fn check_stale(&self) {
         if let Ok(mut file) = fs::OpenOptions::new().read(true).open(self.path.clone()) {
             let mut contents = String::new();
@@ -59,11 +81,15 @@ impl Pidlock {
                         fs::remove_file(&self.path).unwrap();
                     }
                 }
-                Err(_) => fs::remove_file(&self.path).unwrap(),
+                Err(_) => {
+                    warn!("Corrupted/invalid pid file at {}", self.path);
+                    fs::remove_file(&self.path).unwrap();
+                }
             }
         }
     }
 
+    /// Acquire a lock.
     pub fn acquire(&mut self) -> PidlockResult {
         match self.state {
             PidlockState::New => {}
@@ -95,6 +121,7 @@ impl Pidlock {
         self.state == PidlockState::Acquired
     }
 
+    /// Release the lock.
     pub fn release(&mut self) -> PidlockResult {
         match self.state {
             PidlockState::Acquired => {}
