@@ -92,6 +92,11 @@ impl Pidlock {
         Ok(())
     }
 
+    /// Returns true when the lock is in an acquired state.
+    pub fn locked(&self) -> bool {
+        self.state == PidlockState::Acquired
+    }
+
     pub fn release(&mut self) -> PidlockResult {
         match self.state {
             PidlockState::Acquired => {}
@@ -109,8 +114,8 @@ impl Pidlock {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pidlock, PidlockError};
     use super::{getpid, PidlockState};
+    use super::{Pidlock, PidlockError};
 
     const TEST_PID: &str = "/tmp/test.pid";
 
@@ -180,5 +185,18 @@ mod tests {
                 panic!("Test failed");
             }
         }
+    }
+
+    #[test]
+    fn test_locked() {
+        let mut pidfile = Pidlock::new(TEST_PID);
+        pidfile.acquire().unwrap();
+        assert!(pidfile.locked());
+    }
+
+    #[test]
+    fn test_locked_not_locked() {
+        let pidfile = Pidlock::new(TEST_PID);
+        assert!(!pidfile.locked());
     }
 }
