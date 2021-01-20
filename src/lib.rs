@@ -4,8 +4,8 @@ extern crate log;
 #[cfg(test)]
 extern crate rand;
 
-use std::fs;
 use std::io::{Read, Write};
+use std::{fs, process};
 
 #[derive(Debug, PartialEq)]
 pub enum PidlockError {
@@ -20,10 +20,6 @@ enum PidlockState {
     New,
     Acquired,
     Released,
-}
-
-fn getpid() -> u32 {
-    unsafe { libc::getpid() as u32 }
 }
 
 fn process_exists(pid: i32) -> bool {
@@ -45,7 +41,7 @@ pub struct Pidlock {
 impl Pidlock {
     pub fn new(path: &str) -> Self {
         Pidlock {
-            pid: getpid(),
+            pid: process::id(),
             path: path.to_string(),
             state: PidlockState::New,
         }
@@ -119,8 +115,14 @@ mod tests {
     use rand::distributions::Alphanumeric;
     use rand::{thread_rng, Rng};
 
-    use super::{getpid, PidlockState};
+    use super::PidlockState;
     use super::{Pidlock, PidlockError};
+
+    // This was removed from the library itself, but retained here
+    // to assert backwards compatibility with std::process::id
+    fn getpid() -> u32 {
+        unsafe { libc::getpid() as u32 }
+    }
 
     fn make_pid_path() -> String {
         let rand_string: String = thread_rng()
