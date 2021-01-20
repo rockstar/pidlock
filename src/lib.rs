@@ -17,7 +17,7 @@ pub enum PidlockError {
 }
 
 /// A result from a Pidlock operation
-type PidlockResult = Result<(), PidlockError>;
+type PidlockResult = Result<Pidlock, PidlockError>;
 
 /// States a Pidlock can be in during its lifetime.
 #[derive(Debug, PartialEq)]
@@ -90,7 +90,7 @@ impl Pidlock {
     }
 
     /// Acquire a lock.
-    pub fn acquire(&mut self) -> PidlockResult {
+    pub fn acquire(self) -> PidlockResult {
         match self.state {
             PidlockState::New => {}
             _ => {
@@ -112,8 +112,11 @@ impl Pidlock {
         file.write_all(&format!("{}", self.pid).into_bytes()[..])
             .unwrap();
 
-        self.state = PidlockState::Acquired;
-        Ok(())
+        Ok(Pidlock {
+            pid: self.pid,
+            path: self.path,
+            state: PidlockState::Acquired,
+        })
     }
 
     /// Returns true when the lock is in an acquired state.
@@ -122,7 +125,7 @@ impl Pidlock {
     }
 
     /// Release the lock.
-    pub fn release(&mut self) -> PidlockResult {
+    pub fn release(self) -> PidlockResult {
         match self.state {
             PidlockState::Acquired => {}
             _ => {
@@ -132,8 +135,11 @@ impl Pidlock {
 
         fs::remove_file(self.path.clone()).unwrap();
 
-        self.state = PidlockState::Released;
-        Ok(())
+        Ok(Pidlock {
+            pid: self.pid,
+            path: self.path,
+            state: PidlockState::Released,
+        })
     }
 }
 
@@ -172,22 +178,20 @@ mod tests {
 
     #[test]
     fn test_acquire_and_release() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
-        pidfile.acquire().unwrap();
+        let pidfile = Pidlock::new(&make_pid_path()).acquire().unwrap();
 
         assert_eq!(pidfile.state, PidlockState::Acquired);
 
-        pidfile.release().unwrap();
+        let pidfile = pidfile.release().unwrap();
 
         assert_eq!(pidfile.state, PidlockState::Released);
     }
 
     #[test]
     fn test_acquire_lock_exists() {
-        let mut orig_pidfile = Pidlock::new(&make_pid_path());
-        orig_pidfile.acquire().unwrap();
+        let orig_pidfile = Pidlock::new(&make_pid_path()).acquire().unwrap();
 
-        let mut pidfile = Pidlock::new(&orig_pidfile.path);
+        let pidfile = Pidlock::new(&orig_pidfile.path);
         match pidfile.acquire() {
             Err(err) => {
                 orig_pidfile.release().unwrap();
@@ -202,14 +206,15 @@ mod tests {
 
     #[test]
     fn test_acquire_already_acquired() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
-        pidfile.acquire().unwrap();
+        let pidfile = Pidlock::new(&make_pid_path()).acquire().unwrap();
         match pidfile.acquire() {
             Err(err) => {
-                pidfile.release().unwrap();
+                // XXX: rockstar (19 Jan 2021) - The pid file doesn't get
+                // removed here as pidfile was consumed, so we can't call
+                // pidfile.release().
                 assert_eq!(err, PidlockError::InvalidState);
             }
-            _ => {
+            Ok(pidfile) => {
                 pidfile.release().unwrap();
                 panic!("Test failed");
             }
@@ -218,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_release_bad_state() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
+        let pidfile = Pidlock::new(&make_pid_path());
         match pidfile.release() {
             Err(err) => {
                 assert_eq!(err, PidlockError::InvalidState);
@@ -231,8 +236,7 @@ mod tests {
 
     #[test]
     fn test_locked() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
-        pidfile.acquire().unwrap();
+        let pidfile = Pidlock::new(&make_pid_path()).acquire().unwrap();
         assert!(pidfile.locked());
     }
 
