@@ -1,3 +1,4 @@
+use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::{fs, process};
 
@@ -66,27 +67,7 @@ impl Pidlock {
     /// Check whether a lock file already exists, and if it does, whether the
     /// specified pid is still a valid process id on the system.
     fn check_stale(&self) {
-        if let Ok(mut file) = fs::OpenOptions::new().read(true).open(self.path.clone()) {
-            let mut contents = String::new();
-            if file.read_to_string(&mut contents).is_err() {
-                warn!("Removing corrupted/invalid pid file at {}", self.path);
-                fs::remove_file(&self.path).unwrap();
-                return;
-            }
-
-            match contents.trim().parse::<i32>() {
-                Ok(pid) => {
-                    if !process_exists(pid) {
-                        warn!("Removing stale pid file at {}", self.path);
-                        fs::remove_file(&self.path).unwrap();
-                    }
-                }
-                Err(_) => {
-                    warn!("Removing corrupted/invalid pid file at {}", self.path);
-                    fs::remove_file(&self.path).unwrap();
-                }
-            }
-        }
+        self.get_owner();
     }
 
     /// Acquire a lock.
@@ -134,6 +115,40 @@ impl Pidlock {
 
         self.state = PidlockState::Released;
         Ok(())
+    }
+
+    /// Gets the owner of this lockfile, returning the pid. If the lock file doesn't exist,
+    /// or the specified pid is not a valid process id on the system, it clears it.
+    pub fn get_owner(&self) -> Option<u32> {
+        let mut file = match fs::OpenOptions::new().read(true).open(self.path.clone()) {
+            Ok(file) => file,
+            Err(_) => {
+                return None;
+            }
+        };
+
+        let mut contents = String::new();
+        if file.read_to_string(&mut contents).is_err() {
+            warn!("Removing corrupted/invalid pid file at {}", self.path);
+            fs::remove_file(&self.path).unwrap();
+            return None;
+        }
+
+        match contents.trim().parse::<i32>() {
+            Ok(pid) if process_exists(pid) => {
+                Some(pid.try_into().expect("if a pid exists it is a valid u32"))
+            }
+            Ok(_) => {
+                warn!("Removing stale pid file at {}", self.path);
+                fs::remove_file(&self.path).unwrap();
+                None
+            }
+            Err(_) => {
+                warn!("Removing corrupted/invalid pid file at {}", self.path);
+                fs::remove_file(&self.path).unwrap();
+                None
+            }
+        }
     }
 }
 
