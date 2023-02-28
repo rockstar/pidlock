@@ -33,10 +33,26 @@ enum PidlockState {
 /// This function uses unsafe methods to determine process existence. The function
 /// itself is private, and the input is validated prior to call.
 fn process_exists(pid: i32) -> bool {
-    // From the POSIX standard: If sig is 0 (the null signal), error checking
-    // is performed but no signal is actually sent. The null signal can be
-    // used to check the validity of pid.
+    #[cfg(target_os = "windows")]
     unsafe {
+        // If GetExitCodeProcess returns STILL_ACTIVE, then the process
+        // doesn't have an exit code (...or exited with code 259)
+        use windows_sys::Win32::{
+            Foundation::{CloseHandle, STILL_ACTIVE},
+            System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION},
+        };
+        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
+        let mut code = 0;
+        GetExitCodeProcess(handle, &mut code);
+        CloseHandle(handle);
+        code == STILL_ACTIVE as u32
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    unsafe {
+        // From the POSIX standard: If sig is 0 (the null signal), error checking
+        // is performed but no signal is actually sent. The null signal can be
+        // used to check the validity of pid.
         let result = libc::kill(pid, 0);
         result == 0
     }
