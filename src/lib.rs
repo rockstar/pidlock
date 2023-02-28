@@ -1,12 +1,7 @@
-#![cfg_attr(feature = "strict", deny(warnings))]
-extern crate libc;
-#[macro_use]
-extern crate log;
-#[cfg(test)]
-extern crate rand;
-
 use std::io::{Read, Write};
 use std::{fs, process};
+
+use log::warn;
 
 /// Errors that may occur during the `Pidlock` lifetime.
 #[derive(Debug, PartialEq)]
