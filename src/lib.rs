@@ -146,7 +146,10 @@ impl Pidlock {
 
         let mut contents = String::new();
         if file.read_to_string(&mut contents).is_err() {
-            warn!("Removing corrupted/invalid pid file at {}", self.path.to_str().unwrap());
+            warn!(
+                "Removing corrupted/invalid pid file at {}",
+                self.path.to_str().unwrap()
+            );
             fs::remove_file(&self.path).unwrap();
             return None;
         }
@@ -161,7 +164,10 @@ impl Pidlock {
                 None
             }
             Err(_) => {
-                warn!("Removing corrupted/invalid pid file at {}", self.path.to_str().unwrap());
+                warn!(
+                    "Removing corrupted/invalid pid file at {}",
+                    self.path.to_str().unwrap()
+                );
                 fs::remove_file(&self.path).unwrap();
                 None
             }
