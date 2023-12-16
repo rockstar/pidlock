@@ -25,6 +25,9 @@ strict = []  # Warnings are errors
 libc = "0.2.40"
 log = "0.4.1"
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.45.0", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
 [dev-dependencies]
 rand = "0.8.2"
 
