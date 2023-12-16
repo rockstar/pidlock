@@ -1,6 +1,6 @@
 [package]
 name = "pidlock"
-version = "0.1.5"
+version = "0.1.6"
 authors = ["Paul Hummer <paul@eventuallyanyway.com>"]
 license = "MIT"
 edition = "2021"
