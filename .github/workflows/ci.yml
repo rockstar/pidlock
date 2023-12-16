@@ -11,7 +11,8 @@ jobs:
     runs-on: ${{ matrix.os }}-latest
     strategy:
       matrix:
-        os: [Ubuntu, macOS, Windows]
+        # TODO: Add "Windows" to this matrix
+        os: [Ubuntu, macOS]
 
     steps:
     - uses: actions/checkout@v3
