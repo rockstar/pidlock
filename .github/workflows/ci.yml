@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}-latest
+    strategy:
+      matrix:
+        # TODO: Add "Windows" to this matrix
+        os: [Ubuntu, macOS]
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install clippy, rustfmt and cargo-deny
+      run: |
+        rustup component add clippy
+        rustup component add rustfmt
+        cargo install cargo-deny
+    - name: Build
+      run: cargo build --verbose --features strict
+    - name: Run tests
+      run: cargo test --verbose
+    - name: Check lint
+      run: cargo clippy
+    - name: Check format
+      run: cargo fmt -- --check
+    - name: Run cargo deny
+      run: cargo deny check

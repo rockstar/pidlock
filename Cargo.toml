@@ -18,7 +18,7 @@ include = [
 ]
 
 [features]
-default = ["strict"]
+default = []
 strict = []  # Warnings are errors
 
 [dependencies]
