@@ -17,3 +17,5 @@ jobs:
                 toolchain: stable
                 override: true
             - run: cargo publish --token ${CRATES_IO_API_TOKEN}
+              env:
+                CRATES_IO_API_TOKEN: ${{ secrets.CRATES_IO_API_TOKEN }}
