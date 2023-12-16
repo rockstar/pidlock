@@ -1,5 +1,6 @@
 use std::convert::TryInto;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::{fs, process};
 
 use log::warn;
@@ -65,7 +66,7 @@ pub struct Pidlock {
     #[doc = "The current process id"]
     pid: u32,
     #[doc = "A path to the lock file"]
-    path: String,
+    path: PathBuf,
     #[doc = "Current state of the Pidlock"]
     state: PidlockState,
 }
@@ -75,7 +76,7 @@ impl Pidlock {
     pub fn new(path: &str) -> Self {
         Pidlock {
             pid: process::id(),
-            path: path.to_string(),
+            path: PathBuf::from(path),
             state: PidlockState::New,
         }
     }
@@ -145,7 +146,7 @@ impl Pidlock {
 
         let mut contents = String::new();
         if file.read_to_string(&mut contents).is_err() {
-            warn!("Removing corrupted/invalid pid file at {}", self.path);
+            warn!("Removing corrupted/invalid pid file at {}", self.path.to_str().unwrap());
             fs::remove_file(&self.path).unwrap();
             return None;
         }
@@ -155,12 +156,12 @@ impl Pidlock {
                 Some(pid.try_into().expect("if a pid exists it is a valid u32"))
             }
             Ok(_) => {
-                warn!("Removing stale pid file at {}", self.path);
+                warn!("Removing stale pid file at {}", self.path.to_str().unwrap());
                 fs::remove_file(&self.path).unwrap();
                 None
             }
             Err(_) => {
-                warn!("Removing corrupted/invalid pid file at {}", self.path);
+                warn!("Removing corrupted/invalid pid file at {}", self.path.to_str().unwrap());
                 fs::remove_file(&self.path).unwrap();
                 None
             }
@@ -172,6 +173,7 @@ impl Pidlock {
 mod tests {
     use std::fs;
     use std::io::Write;
+    use std::path::PathBuf;
 
     use rand::distributions::Alphanumeric;
     use rand::{thread_rng, Rng};
@@ -191,7 +193,7 @@ mod tests {
             .take(10)
             .map(char::from)
             .collect();
-        format!("/tmp/test.{}.pid", rand_string).to_string()
+        format!("/tmp/test.{}.pid", rand_string)
     }
 
     #[test]
@@ -200,7 +202,7 @@ mod tests {
         let pidfile = Pidlock::new(&pid_path);
 
         assert_eq!(pidfile.pid, getpid());
-        assert_eq!(pidfile.path, pid_path);
+        assert_eq!(pidfile.path, PathBuf::from(pid_path));
         assert_eq!(pidfile.state, PidlockState::New);
     }
 
@@ -221,7 +223,7 @@ mod tests {
         let mut orig_pidfile = Pidlock::new(&make_pid_path());
         orig_pidfile.acquire().unwrap();
 
-        let mut pidfile = Pidlock::new(&orig_pidfile.path);
+        let mut pidfile = Pidlock::new(orig_pidfile.path.to_str().unwrap());
         match pidfile.acquire() {
             Err(err) => {
                 orig_pidfile.release().unwrap();
