@@ -182,7 +182,7 @@ mod tests {
     use std::path::PathBuf;
 
     use rand::distributions::Alphanumeric;
-    use rand::{thread_rng, Rng};
+    use rand::{Rng, thread_rng};
 
     use super::PidlockState;
     use super::{Pidlock, PidlockError};
@@ -293,7 +293,7 @@ mod tests {
             .open(path.clone())
         {
             Ok(mut file) => {
-                file.write_all(&format!("{}", thread_rng().gen::<i32>()).into_bytes()[..])
+                file.write_all(&format!("{}", thread_rng().r#gen::<i32>()).into_bytes()[..])
                     .unwrap();
             }
             Err(_) => {
@@ -341,7 +341,7 @@ mod tests {
             .open(path.clone())
         {
             Ok(mut file) => {
-                file.write_all(&rand::thread_rng().gen::<[u8; 32]>())
+                file.write_all(&rand::thread_rng().r#gen::<[u8; 32]>())
                     .unwrap();
             }
             Err(_) => {
