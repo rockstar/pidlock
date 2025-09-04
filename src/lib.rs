@@ -38,21 +38,30 @@ enum PidlockState {
 /// This function uses unsafe methods to determine process existence. The function
 /// itself is private, and the input is validated prior to call.
 fn process_exists(pid: i32) -> bool {
-    // SAFETY: This function is safe because it only checks for the existence
-    // of a process
+    // SAFETY: This function validates the input and return values before
+    // continuing.
     #[cfg(target_os = "windows")]
     unsafe {
         // If GetExitCodeProcess returns STILL_ACTIVE, then the process
         // doesn't have an exit code (...or exited with code 259)
         use windows_sys::Win32::{
-            Foundation::{CloseHandle, STILL_ACTIVE},
+            Foundation::{CloseHandle, INVALID_HANDLE_VALUE, STILL_ACTIVE},
             System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION},
         };
         let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
+
+        // SAFETY: We must check if OpenProcess failed before using the handle
+        if handle == 0 || handle == INVALID_HANDLE_VALUE {
+            // Process doesn't exist or we don't have permission to query it
+            return false;
+        }
+
         let mut code = 0;
-        GetExitCodeProcess(handle, &mut code);
+        let success = GetExitCodeProcess(handle, &mut code);
         CloseHandle(handle);
-        code == STILL_ACTIVE as u32
+
+        // SAFETY: Only return true if GetExitCodeProcess succeeded and process is still active
+        success != 0 && code == STILL_ACTIVE as u32
     }
 
     // SAFETY: This function is safe because it only checks for the existence
