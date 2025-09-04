@@ -1,6 +1,6 @@
 use std::convert::TryInto;
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fs, process};
 
 use log::warn;
@@ -79,10 +79,10 @@ pub struct Pidlock {
 
 impl Pidlock {
     /// Create a new Pidlock at the provided path.
-    pub fn new(path: &str) -> Self {
+    pub fn new(path: impl AsRef<Path>) -> Self {
         Pidlock {
             pid: process::id(),
-            path: PathBuf::from(path),
+            path: path.as_ref().into(),
             state: PidlockState::New,
         }
     }
@@ -217,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_acquire_and_release() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
+        let mut pidfile = Pidlock::new(make_pid_path());
         pidfile.acquire().unwrap();
 
         assert_eq!(pidfile.state, PidlockState::Acquired);
@@ -229,7 +229,7 @@ mod tests {
 
     #[test]
     fn test_acquire_lock_exists() {
-        let mut orig_pidfile = Pidlock::new(&make_pid_path());
+        let mut orig_pidfile = Pidlock::new(make_pid_path());
         orig_pidfile.acquire().unwrap();
 
         let mut pidfile = Pidlock::new(orig_pidfile.path.to_str().unwrap());
@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn test_acquire_already_acquired() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
+        let mut pidfile = Pidlock::new(make_pid_path());
         pidfile.acquire().unwrap();
         match pidfile.acquire() {
             Err(err) => {
@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn test_release_bad_state() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
+        let mut pidfile = Pidlock::new(make_pid_path());
         match pidfile.release() {
             Err(err) => {
                 assert_eq!(err, PidlockError::InvalidState);
@@ -276,14 +276,14 @@ mod tests {
 
     #[test]
     fn test_locked() {
-        let mut pidfile = Pidlock::new(&make_pid_path());
+        let mut pidfile = Pidlock::new(make_pid_path());
         pidfile.acquire().unwrap();
         assert!(pidfile.locked());
     }
 
     #[test]
     fn test_locked_not_locked() {
-        let pidfile = Pidlock::new(&make_pid_path());
+        let pidfile = Pidlock::new(make_pid_path());
         assert!(!pidfile.locked());
     }
 
