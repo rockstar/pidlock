@@ -106,7 +106,7 @@ impl Pidlock {
         let mut file = match fs::OpenOptions::new()
             .create_new(true)
             .write(true)
-            .open(self.path.clone())
+            .open(&self.path)
         {
             Ok(file) => file,
             Err(_) => {
@@ -134,7 +134,7 @@ impl Pidlock {
             }
         }
 
-        fs::remove_file(self.path.clone()).map_err(|_err| PidlockError::IOError)?;
+        fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
 
         self.state = PidlockState::Released;
         Ok(())
@@ -143,7 +143,7 @@ impl Pidlock {
     /// Gets the owner of this lockfile, returning the pid. If the lock file doesn't exist,
     /// or the specified pid is not a valid process id on the system, it clears it.
     pub fn get_owner(&self) -> Result<Option<u32>, PidlockError> {
-        let mut file = match fs::OpenOptions::new().read(true).open(self.path.clone()) {
+        let mut file = match fs::OpenOptions::new().read(true).open(&self.path) {
             Ok(file) => file,
             Err(_) => {
                 return Ok(None);
