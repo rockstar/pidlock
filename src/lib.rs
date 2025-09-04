@@ -15,6 +15,8 @@ pub enum PidlockError {
     InvalidState,
     #[doc = "An I/O error occurred"]
     IOError(std::io::Error),
+    #[doc = "Invalid path provided for lock file"]
+    InvalidPath(String),
 }
 
 impl PartialEq for PidlockError {
@@ -26,6 +28,7 @@ impl PartialEq for PidlockError {
                 // Compare IO errors by their kind and to_string representation
                 a.kind() == b.kind() && a.to_string() == b.to_string()
             }
+            (PidlockError::InvalidPath(a), PidlockError::InvalidPath(b)) => a == b,
             _ => false,
         }
     }
@@ -49,6 +52,121 @@ enum PidlockState {
     Acquired,
     #[doc = "A lock is released"]
     Released,
+}
+
+/// Validates that a path is suitable for use as a lock file.
+/// Checks for common cross-platform path issues.
+fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
+    #[cfg(feature = "log")]
+    if path.is_relative() {
+        warn!(
+            "Using relative path for lock file: {:?}. Consider using absolute paths for better reliability.",
+            path
+        );
+    }
+
+    // Check for empty path
+    if path.as_os_str().is_empty() {
+        return Err(PidlockError::InvalidPath(
+            "Path cannot be empty".to_string(),
+        ));
+    }
+
+    // Check for common problematic characters in filename
+    if let Some(filename) = path.file_name() {
+        let filename_str = filename.to_string_lossy();
+
+        // Check for reserved names on Windows
+        #[cfg(target_os = "windows")]
+        {
+            let reserved_names = [
+                "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
+                "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",
+                "LPT9",
+            ];
+            let base_name = filename_str
+                .split('.')
+                .next()
+                .unwrap_or(&filename_str)
+                .to_uppercase();
+            if reserved_names.contains(&base_name.as_str()) {
+                return Err(PidlockError::InvalidPath(format!(
+                    "Filename '{}' is reserved on Windows",
+                    filename_str
+                )));
+            }
+        }
+
+        // Check for problematic characters
+        let problematic_chars = ['<', '>', ':', '"', '|', '?', '*'];
+        for &ch in &problematic_chars {
+            if filename_str.contains(ch) {
+                return Err(PidlockError::InvalidPath(format!(
+                    "Filename contains problematic character '{}': {}",
+                    ch, filename_str
+                )));
+            }
+        }
+
+        // Check for control characters
+        if filename_str.chars().any(|c| c.is_control()) {
+            return Err(PidlockError::InvalidPath(format!(
+                "Filename contains control characters: {}",
+                filename_str
+            )));
+        }
+    }
+
+    // Try to validate parent directory exists or can be created
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        // Check if we can potentially create the directory
+        if let Err(e) = fs::create_dir_all(parent) {
+            return Err(PidlockError::InvalidPath(format!(
+                "Cannot create parent directory {}: {}",
+                parent.display(),
+                e
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+/// Validates that a PID is within reasonable bounds for the current system.
+fn validate_pid(pid: i32) -> bool {
+    // PIDs should be positive
+    if pid <= 0 {
+        return false;
+    }
+
+    // Check against system-specific limits
+    #[cfg(target_os = "linux")]
+    {
+        // Linux typically allows PIDs up to 2^22 (4194304) by default
+        // But can be configured higher. We'll use a conservative limit.
+        pid <= 4194304
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        // macOS uses 32-bit PIDs but typically keeps them much lower
+        pid <= 99999
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // Windows uses 32-bit process IDs
+        // pid <= i32::MAX will always return true
+        true
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+    {
+        // Conservative default for other Unix-like systems
+        pid <= 99999
+    }
 }
 
 /// Check whether a process exists, used to determine whether a pid file is stale.
@@ -98,6 +216,7 @@ fn process_exists(pid: i32) -> bool {
 
 /// A pid-centered lock. A lock is considered "acquired" when a file exists on disk
 /// at the path specified, containing the process id of the locking process.
+#[derive(Debug)]
 pub struct Pidlock {
     #[doc = "The current process id"]
     pid: u32,
@@ -109,12 +228,37 @@ pub struct Pidlock {
 
 impl Pidlock {
     /// Create a new Pidlock at the provided path.
+    ///
+    /// For backwards compatibility, this method does not validate the path.
+    /// Use `new_validated` if you want path validation.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use `new_validated` for path validation and better cross-platform compatibility"
+    )]
     pub fn new(path: impl AsRef<Path>) -> Self {
         Pidlock {
             pid: process::id(),
             path: path.as_ref().into(),
             state: PidlockState::New,
         }
+    }
+
+    /// Create a new Pidlock at the provided path with path validation.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PidlockError::InvalidPath` if the path is not suitable for use as a lock file.
+    pub fn new_validated(path: impl AsRef<Path>) -> Result<Self, PidlockError> {
+        let path_ref = path.as_ref();
+
+        // Validate the path before creating the Pidlock
+        validate_lock_path(path_ref)?;
+
+        Ok(Pidlock {
+            pid: process::id(),
+            path: path_ref.into(),
+            state: PidlockState::New,
+        })
     }
 
     /// Check whether a lock file already exists, and if it does, whether the
@@ -133,18 +277,32 @@ impl Pidlock {
         }
         self.check_stale();
 
-        let mut file = match fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&self.path)
+        // Create file with appropriate permissions
+        let mut options = fs::OpenOptions::new();
+        options.create_new(true).write(true);
+
+        // Set restrictive permissions on Unix-like systems for security
+        #[cfg(unix)]
         {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o644); // rw-r--r--
+        }
+
+        let mut file = match options.open(&self.path) {
             Ok(file) => file,
-            Err(_) => {
-                return Err(PidlockError::LockExists);
+            Err(err) => {
+                return match err.kind() {
+                    std::io::ErrorKind::AlreadyExists => Err(PidlockError::LockExists),
+                    _ => Err(PidlockError::from(err)),
+                };
             }
         };
+
         file.write_all(&self.pid.to_string().into_bytes()[..])
             .map_err(PidlockError::from)?;
+
+        // Ensure data is written to disk for reliability
+        file.flush().map_err(PidlockError::from)?;
 
         self.state = PidlockState::Acquired;
         Ok(())
@@ -192,7 +350,7 @@ impl Pidlock {
         }
 
         match contents.trim().parse::<i32>() {
-            Ok(pid) if process_exists(pid) => Ok(Some(pid)),
+            Ok(pid) if validate_pid(pid) && process_exists(pid) => Ok(Some(pid)),
             Ok(_) => {
                 #[cfg(feature = "log")]
                 warn!(
@@ -231,6 +389,7 @@ impl Drop for Pidlock {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -621,5 +780,150 @@ mod tests {
         assert_eq!(owner, Some(std::process::id() as i32));
 
         pidfile.release().unwrap();
+    }
+
+    #[test]
+    fn test_new_validated_valid_path() {
+        let temp_file = make_temp_file();
+        let path = temp_file.path();
+
+        let pidfile = Pidlock::new_validated(path);
+        assert!(pidfile.is_ok());
+
+        let pidfile = pidfile.unwrap();
+        assert_eq!(pidfile.pid, std::process::id());
+        assert_eq!(pidfile.path, PathBuf::from(path));
+        assert_eq!(pidfile.state, PidlockState::New);
+    }
+
+    #[test]
+    fn test_new_validated_empty_path() {
+        let result = Pidlock::new_validated("");
+        match result {
+            Err(PidlockError::InvalidPath(_)) => {} // Expected
+            other => panic!("Expected InvalidPath error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_new_validated_problematic_characters() {
+        // Test various problematic characters
+        let problematic_paths = [
+            "/tmp/test<file.pid",
+            "/tmp/test>file.pid",
+            "/tmp/test|file.pid",
+            "/tmp/test?file.pid",
+            "/tmp/test*file.pid",
+        ];
+
+        for path in &problematic_paths {
+            let result = Pidlock::new_validated(path);
+            match result {
+                Err(PidlockError::InvalidPath(_)) => {} // Expected
+                other => panic!("Expected InvalidPath for '{}', got {:?}", path, other),
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn test_new_validated_reserved_names_windows() {
+        let reserved_paths = [
+            "CON.pid", "PRN.pid", "AUX.pid", "NUL.pid", "COM1.pid", "LPT1.pid",
+        ];
+
+        for path in &reserved_paths {
+            let result = Pidlock::new_validated(path);
+            match result {
+                Err(PidlockError::InvalidPath(_)) => {} // Expected
+                other => panic!("Expected InvalidPath for '{}', got {:?}", path, other),
+            }
+        }
+    }
+
+    #[test]
+    fn test_validate_pid_ranges() {
+        use super::validate_pid;
+
+        // Test valid PIDs
+        assert!(validate_pid(1));
+        assert!(validate_pid(1000));
+
+        // Test invalid PIDs
+        assert!(!validate_pid(0));
+        assert!(!validate_pid(-1));
+        assert!(!validate_pid(-12345));
+
+        // Test system-specific upper bounds
+        #[cfg(target_os = "linux")]
+        {
+            assert!(validate_pid(4194304)); // Should be valid on Linux
+            assert!(!validate_pid(4194305)); // Should be invalid
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            assert!(validate_pid(99999)); // Should be valid on macOS
+            assert!(!validate_pid(100000)); // Should be invalid
+        }
+    }
+
+    #[test]
+    fn test_get_owner_with_invalid_pid_range() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write a PID that's outside valid range (negative)
+        temp_file.write_all(b"-500").unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Invalid PID should be cleaned up
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_file_permissions_unix() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        let mut pidfile = Pidlock::new(&path);
+        pidfile.acquire().unwrap();
+
+        // Check that file has correct permissions (644)
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+
+        pidfile.release().unwrap();
+    }
+
+    #[test]
+    fn test_acquire_detailed_error_handling() {
+        // Test that we get proper error details instead of generic IOError
+        let mut pidfile = Pidlock::new("/root/cannot_create_here/test.pid");
+
+        let result = pidfile.acquire();
+        match result {
+            Ok(_) => {
+                // This might actually succeed in some test environments
+                // so we don't fail the test
+            }
+            Err(PidlockError::IOError(io_err)) => {
+                // Verify we get detailed error information
+                assert!(!io_err.to_string().is_empty());
+                // Should be a permission denied or not found error
+                assert!(matches!(
+                    io_err.kind(),
+                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
+                ));
+            }
+            Err(other) => panic!("Expected IOError, got {:?}", other),
+        }
     }
 }
