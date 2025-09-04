@@ -1,4 +1,3 @@
-use std::convert::TryInto;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::{fs, process};
@@ -152,7 +151,7 @@ impl Pidlock {
 
     /// Gets the owner of this lockfile, returning the pid. If the lock file doesn't exist,
     /// or the specified pid is not a valid process id on the system, it clears it.
-    pub fn get_owner(&self) -> Result<Option<u32>, PidlockError> {
+    pub fn get_owner(&self) -> Result<Option<i32>, PidlockError> {
         let mut file = match fs::OpenOptions::new().read(true).open(&self.path) {
             Ok(file) => file,
             Err(_) => {
@@ -171,9 +170,7 @@ impl Pidlock {
         }
 
         match contents.trim().parse::<i32>() {
-            Ok(pid) if process_exists(pid) => {
-                Ok(Some(pid.try_into().map_err(|_err| PidlockError::IOError)?))
-            }
+            Ok(pid) if process_exists(pid) => Ok(Some(pid)),
             Ok(_) => {
                 warn!(
                     "Removing stale pid file at {}",
