@@ -36,3 +36,10 @@ rand = "0.8.2"
 
 [badges]
 circle-ci = { repository = "rockstar/pidlock", branch = "master" }
+
+[lints.clippy]
+expect_used = { level = "deny" }
+panic = { level = "deny" }
+print_stdout = { level = "deny" }
+undocumented_unsafe_blocks = { level = "deny" }
+unwrap_used = { level = "deny" }
