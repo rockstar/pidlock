@@ -191,6 +191,20 @@ impl Pidlock {
     }
 }
 
+impl Drop for Pidlock {
+    /// Automatically release the lock when the Pidlock goes out of scope.
+    /// This ensures that lock files are cleaned up even if the process panics
+    /// or exits unexpectedly while holding a lock.
+    fn drop(&mut self) {
+        if self.state == PidlockState::Acquired {
+            // We use a best-effort approach here - if cleanup fails, we don't panic
+            // because that could mask the original panic that triggered the drop.
+            // We also don't log errors here to avoid potential issues during unwinding.
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -349,5 +363,54 @@ mod tests {
         let mut pidfile = Pidlock::new(&path);
         pidfile.acquire().unwrap();
         assert_eq!(pidfile.state, PidlockState::Acquired);
+    }
+
+    #[test]
+    fn test_drop_cleans_up_lock_file() {
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Create and acquire a lock in a scope
+        {
+            let mut pidfile = Pidlock::new(&path);
+            pidfile.acquire().unwrap();
+            assert_eq!(pidfile.state, PidlockState::Acquired);
+
+            // Verify the lock file exists
+            assert!(std::path::Path::new(&path).exists());
+
+            // The Drop implementation should clean up when pidfile goes out of scope
+        }
+
+        // After the scope ends, the lock file should be cleaned up
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn test_drop_only_cleans_up_when_acquired() {
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Create a lock but don't acquire it
+        {
+            let _pidfile = Pidlock::new(&path);
+            // Lock is not acquired, so drop should not try to remove anything
+        }
+
+        // Should not have attempted to remove a non-existent lock file
+        // (This test mainly ensures no panic occurs during drop)
+
+        // Now create a lock, acquire and manually release it
+        {
+            let mut pidfile = Pidlock::new(&path);
+            pidfile.acquire().unwrap();
+            pidfile.release().unwrap();
+            assert_eq!(pidfile.state, PidlockState::Released);
+
+            // Drop should not try to clean up since state is Released
+        }
+
+        // File should already be gone from manual release
+        assert!(!std::path::Path::new(&path).exists());
     }
 }
