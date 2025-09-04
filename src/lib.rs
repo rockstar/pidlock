@@ -433,4 +433,189 @@ mod tests {
         // File should already be gone from manual release
         assert!(!std::path::Path::new(&path).exists());
     }
+
+    #[test]
+    fn test_get_owner_no_file() {
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_get_owner_valid_pid() {
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // First create a lock with our own PID
+        let mut pidfile = Pidlock::new(&path);
+        pidfile.acquire().unwrap();
+
+        // Now test get_owner returns our PID
+        let result = pidfile.get_owner().unwrap();
+        assert_eq!(result, Some(std::process::id() as i32));
+
+        pidfile.release().unwrap();
+    }
+
+    #[test]
+    fn test_get_owner_empty_file() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write empty content
+        temp_file.write_all(b"").unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Empty file should be cleaned up and return None
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn test_get_owner_whitespace_only() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write whitespace-only content
+        temp_file.write_all(b"   \n  \t  \r\n  ").unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Whitespace-only file should be cleaned up and return None
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn test_get_owner_negative_pid() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write a negative PID (which shouldn't exist)
+        temp_file.write_all(b"-12345").unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Negative PID should be cleaned up and return None
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn test_get_owner_large_pid() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write a very large PID (likely doesn't exist but valid i32)
+        let large_pid = i32::MAX;
+        temp_file
+            .write_all(large_pid.to_string().as_bytes())
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Large PID should be cleaned up since it likely doesn't exist
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn test_get_owner_zero_pid() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write PID 0 (which may or may not exist depending on the system)
+        temp_file.write_all(b"0").unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+
+        // PID 0 behavior is system-dependent:
+        // - On some systems (like macOS), PID 0 exists (kernel)
+        // - On others, it may not
+        // We just verify the method doesn't panic and returns a valid result
+        match result {
+            Some(0) => {
+                // PID 0 exists on this system, file should remain
+                assert!(std::path::Path::new(&path).exists());
+            }
+            None => {
+                // PID 0 doesn't exist, file should be cleaned up
+                assert!(!std::path::Path::new(&path).exists());
+            }
+            Some(other) => {
+                panic!("Expected PID 0 or None, got Some({})", other);
+            }
+        }
+    }
+
+    #[test]
+    fn test_get_owner_mixed_content() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write PID with trailing content that should be ignored
+        temp_file.write_all(b"12345 extra content").unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Should parse the PID part and clean up since 12345 likely doesn't exist
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn test_concurrent_acquire_attempts() {
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // First lock should succeed
+        let mut lock1 = Pidlock::new(&path);
+        assert!(lock1.acquire().is_ok());
+
+        // Second lock should fail with LockExists
+        let mut lock2 = Pidlock::new(&path);
+        match lock2.acquire() {
+            Err(PidlockError::LockExists) => {} // Expected
+            other => panic!("Expected LockExists, got {:?}", other),
+        }
+
+        // Clean up
+        lock1.release().unwrap();
+
+        // Now second lock should succeed
+        assert!(lock2.acquire().is_ok());
+        lock2.release().unwrap();
+    }
+
+    #[test]
+    fn test_acquire_after_stale_cleanup() {
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write a definitely non-existent PID
+        temp_file.write_all(b"999999").unwrap();
+        temp_file.flush().unwrap();
+
+        // Acquiring should clean up the stale file and succeed
+        let mut pidfile = Pidlock::new(&path);
+        assert!(pidfile.acquire().is_ok());
+        assert_eq!(pidfile.state, PidlockState::Acquired);
+
+        // Verify the file now contains our PID
+        let owner = pidfile.get_owner().unwrap();
+        assert_eq!(owner, Some(std::process::id() as i32));
+
+        pidfile.release().unwrap();
+    }
 }
