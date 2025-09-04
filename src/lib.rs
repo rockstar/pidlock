@@ -6,14 +6,34 @@ use log::warn;
 
 /// Errors that may occur during the `Pidlock` lifetime.
 #[non_exhaustive]
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub enum PidlockError {
     #[doc = "A lock already exists"]
     LockExists,
     #[doc = "An operation was attempted in the wrong state, e.g. releasing before acquiring."]
     InvalidState,
     #[doc = "An I/O error occurred"]
-    IOError,
+    IOError(std::io::Error),
+}
+
+impl PartialEq for PidlockError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (PidlockError::LockExists, PidlockError::LockExists) => true,
+            (PidlockError::InvalidState, PidlockError::InvalidState) => true,
+            (PidlockError::IOError(a), PidlockError::IOError(b)) => {
+                // Compare IO errors by their kind and to_string representation
+                a.kind() == b.kind() && a.to_string() == b.to_string()
+            }
+            _ => false,
+        }
+    }
+}
+
+impl From<std::io::Error> for PidlockError {
+    fn from(err: std::io::Error) -> Self {
+        PidlockError::IOError(err)
+    }
 }
 
 /// A result from a Pidlock operation
@@ -123,7 +143,7 @@ impl Pidlock {
             }
         };
         file.write_all(&self.pid.to_string().into_bytes()[..])
-            .map_err(|_err| PidlockError::IOError)?;
+            .map_err(PidlockError::from)?;
 
         self.state = PidlockState::Acquired;
         Ok(())
@@ -143,7 +163,7 @@ impl Pidlock {
             }
         }
 
-        fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
+        fs::remove_file(&self.path).map_err(PidlockError::from)?;
 
         self.state = PidlockState::Released;
         Ok(())
@@ -165,7 +185,7 @@ impl Pidlock {
                 "Removing corrupted/invalid pid file at {}",
                 self.path.to_str().unwrap_or("<invalid>")
             );
-            fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
+            fs::remove_file(&self.path).map_err(PidlockError::from)?;
             return Ok(None);
         }
 
@@ -176,7 +196,7 @@ impl Pidlock {
                     "Removing stale pid file at {}",
                     self.path.to_str().unwrap_or("<invalid>")
                 );
-                fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
+                fs::remove_file(&self.path).map_err(PidlockError::from)?;
                 Ok(None)
             }
             Err(_) => {
@@ -184,7 +204,7 @@ impl Pidlock {
                     "Removing corrupted/invalid pid file at {}",
                     self.path.to_str().unwrap_or("<invalid>")
                 );
-                fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
+                fs::remove_file(&self.path).map_err(PidlockError::from)?;
                 Ok(None)
             }
         }
