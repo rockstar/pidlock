@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::{fs, process};
 
+#[cfg(feature = "log")]
 use log::warn;
 
 /// Errors that may occur during the `Pidlock` lifetime.
@@ -181,6 +182,7 @@ impl Pidlock {
 
         let mut contents = String::new();
         if file.read_to_string(&mut contents).is_err() {
+            #[cfg(feature = "log")]
             warn!(
                 "Removing corrupted/invalid pid file at {}",
                 self.path.to_str().unwrap_or("<invalid>")
@@ -192,6 +194,7 @@ impl Pidlock {
         match contents.trim().parse::<i32>() {
             Ok(pid) if process_exists(pid) => Ok(Some(pid)),
             Ok(_) => {
+                #[cfg(feature = "log")]
                 warn!(
                     "Removing stale pid file at {}",
                     self.path.to_str().unwrap_or("<invalid>")
@@ -200,6 +203,7 @@ impl Pidlock {
                 Ok(None)
             }
             Err(_) => {
+                #[cfg(feature = "log")]
                 warn!(
                     "Removing corrupted/invalid pid file at {}",
                     self.path.to_str().unwrap_or("<invalid>")
