@@ -187,29 +187,25 @@ impl Pidlock {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
     use std::io::Write;
     use std::path::PathBuf;
 
     use rand::distributions::Alphanumeric;
     use rand::{Rng, thread_rng};
+    use tempfile::NamedTempFile;
 
     use super::PidlockState;
     use super::{Pidlock, PidlockError};
 
-    fn make_pid_path() -> String {
-        let rand_string: String = thread_rng()
-            .sample_iter(&Alphanumeric)
-            .take(10)
-            .map(char::from)
-            .collect();
-        format!("/tmp/test.{}.pid", rand_string)
+    fn make_temp_file() -> NamedTempFile {
+        NamedTempFile::new().expect("Failed to create temporary file")
     }
 
     #[test]
     fn test_new() {
-        let pid_path = make_pid_path();
-        let pidfile = Pidlock::new(&pid_path);
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let pidfile = Pidlock::new(pid_path);
 
         assert_eq!(pidfile.pid, std::process::id());
         assert_eq!(pidfile.path, PathBuf::from(pid_path));
@@ -218,7 +214,9 @@ mod tests {
 
     #[test]
     fn test_acquire_and_release() {
-        let mut pidfile = Pidlock::new(make_pid_path());
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let mut pidfile = Pidlock::new(pid_path);
         pidfile.acquire().unwrap();
 
         assert_eq!(pidfile.state, PidlockState::Acquired);
@@ -230,7 +228,9 @@ mod tests {
 
     #[test]
     fn test_acquire_lock_exists() {
-        let mut orig_pidfile = Pidlock::new(make_pid_path());
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let mut orig_pidfile = Pidlock::new(pid_path);
         orig_pidfile.acquire().unwrap();
 
         let mut pidfile = Pidlock::new(orig_pidfile.path.to_str().unwrap());
@@ -248,7 +248,9 @@ mod tests {
 
     #[test]
     fn test_acquire_already_acquired() {
-        let mut pidfile = Pidlock::new(make_pid_path());
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let mut pidfile = Pidlock::new(pid_path);
         pidfile.acquire().unwrap();
         match pidfile.acquire() {
             Err(err) => {
@@ -264,7 +266,9 @@ mod tests {
 
     #[test]
     fn test_release_bad_state() {
-        let mut pidfile = Pidlock::new(make_pid_path());
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let mut pidfile = Pidlock::new(pid_path);
         match pidfile.release() {
             Err(err) => {
                 assert_eq!(err, PidlockError::InvalidState);
@@ -277,33 +281,31 @@ mod tests {
 
     #[test]
     fn test_locked() {
-        let mut pidfile = Pidlock::new(make_pid_path());
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let mut pidfile = Pidlock::new(pid_path);
         pidfile.acquire().unwrap();
         assert!(pidfile.locked());
     }
 
     #[test]
     fn test_locked_not_locked() {
-        let pidfile = Pidlock::new(make_pid_path());
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let pidfile = Pidlock::new(pid_path);
         assert!(!pidfile.locked());
     }
 
     #[test]
     fn test_stale_pid() {
-        let path = make_pid_path();
-        match fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path.clone())
-        {
-            Ok(mut file) => {
-                file.write_all(&thread_rng().r#gen::<i32>().to_ne_bytes())
-                    .unwrap();
-            }
-            Err(_) => {
-                panic!("Could not open file for writing");
-            }
-        };
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write a random PID to the temp file
+        temp_file
+            .write_all(&format!("{}", thread_rng().r#gen::<i32>()).into_bytes()[..])
+            .unwrap();
+        temp_file.flush().unwrap();
 
         let mut pidfile = Pidlock::new(&path);
         pidfile.acquire().unwrap();
@@ -312,24 +314,16 @@ mod tests {
 
     #[test]
     fn test_stale_pid_invalid_contents() {
-        let path = make_pid_path();
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
         let contents: String = thread_rng()
             .sample_iter(&Alphanumeric)
             .take(20)
             .map(char::from)
             .collect();
-        match fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path.clone())
-        {
-            Ok(mut file) => {
-                file.write_all(&contents.into_bytes()).unwrap();
-            }
-            Err(_) => {
-                panic!("Could not open file for writing");
-            }
-        };
+        temp_file.write_all(&contents.into_bytes()).unwrap();
+        temp_file.flush().unwrap();
 
         let mut pidfile = Pidlock::new(&path);
         pidfile.acquire().unwrap();
@@ -338,20 +332,13 @@ mod tests {
 
     #[test]
     fn test_stale_pid_corrupted_contents() {
-        let path = make_pid_path();
-        match fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path.clone())
-        {
-            Ok(mut file) => {
-                file.write_all(&rand::thread_rng().r#gen::<[u8; 32]>())
-                    .unwrap();
-            }
-            Err(_) => {
-                panic!("Could not open file for writing");
-            }
-        };
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        temp_file
+            .write_all(&rand::thread_rng().r#gen::<[u8; 32]>())
+            .unwrap();
+        temp_file.flush().unwrap();
 
         let mut pidfile = Pidlock::new(&path);
         pidfile.acquire().unwrap();
