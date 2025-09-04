@@ -12,6 +12,8 @@ pub enum PidlockError {
     LockExists,
     #[doc = "An operation was attempted in the wrong state, e.g. releasing before acquiring."]
     InvalidState,
+    #[doc = "An I/O error occurred"]
+    IOError,
 }
 
 /// A result from a Pidlock operation
@@ -35,6 +37,8 @@ enum PidlockState {
 /// This function uses unsafe methods to determine process existence. The function
 /// itself is private, and the input is validated prior to call.
 fn process_exists(pid: i32) -> bool {
+    // SAFETY: This function is safe because it only checks for the existence
+    // of a process
     #[cfg(target_os = "windows")]
     unsafe {
         // If GetExitCodeProcess returns STILL_ACTIVE, then the process
@@ -50,6 +54,8 @@ fn process_exists(pid: i32) -> bool {
         code == STILL_ACTIVE as u32
     }
 
+    // SAFETY: This function is safe because it only checks for the existence
+    // of a process
     #[cfg(not(target_os = "windows"))]
     unsafe {
         // From the POSIX standard: If sig is 0 (the null signal), error checking
@@ -84,7 +90,7 @@ impl Pidlock {
     /// Check whether a lock file already exists, and if it does, whether the
     /// specified pid is still a valid process id on the system.
     fn check_stale(&self) {
-        self.get_owner();
+        let _ = self.get_owner();
     }
 
     /// Acquire a lock.
@@ -108,7 +114,7 @@ impl Pidlock {
             }
         };
         file.write_all(&format!("{}", self.pid).into_bytes()[..])
-            .unwrap();
+            .map_err(|_err| PidlockError::IOError)?;
 
         self.state = PidlockState::Acquired;
         Ok(())
@@ -128,7 +134,7 @@ impl Pidlock {
             }
         }
 
-        fs::remove_file(self.path.clone()).unwrap();
+        fs::remove_file(self.path.clone()).map_err(|_err| PidlockError::IOError)?;
 
         self.state = PidlockState::Released;
         Ok(())
@@ -136,11 +142,11 @@ impl Pidlock {
 
     /// Gets the owner of this lockfile, returning the pid. If the lock file doesn't exist,
     /// or the specified pid is not a valid process id on the system, it clears it.
-    pub fn get_owner(&self) -> Option<u32> {
+    pub fn get_owner(&self) -> Result<Option<u32>, PidlockError> {
         let mut file = match fs::OpenOptions::new().read(true).open(self.path.clone()) {
             Ok(file) => file,
             Err(_) => {
-                return None;
+                return Ok(None);
             }
         };
 
@@ -148,28 +154,31 @@ impl Pidlock {
         if file.read_to_string(&mut contents).is_err() {
             warn!(
                 "Removing corrupted/invalid pid file at {}",
-                self.path.to_str().unwrap()
+                self.path.to_str().unwrap_or("<invalid>")
             );
-            fs::remove_file(&self.path).unwrap();
-            return None;
+            fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
+            return Ok(None);
         }
 
         match contents.trim().parse::<i32>() {
             Ok(pid) if process_exists(pid) => {
-                Some(pid.try_into().expect("if a pid exists it is a valid u32"))
+                Ok(Some(pid.try_into().map_err(|_err| PidlockError::IOError)?))
             }
             Ok(_) => {
-                warn!("Removing stale pid file at {}", self.path.to_str().unwrap());
-                fs::remove_file(&self.path).unwrap();
-                None
+                warn!(
+                    "Removing stale pid file at {}",
+                    self.path.to_str().unwrap_or("<invalid>")
+                );
+                fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
+                Ok(None)
             }
             Err(_) => {
                 warn!(
                     "Removing corrupted/invalid pid file at {}",
-                    self.path.to_str().unwrap()
+                    self.path.to_str().unwrap_or("<invalid>")
                 );
-                fs::remove_file(&self.path).unwrap();
-                None
+                fs::remove_file(&self.path).map_err(|_err| PidlockError::IOError)?;
+                Ok(None)
             }
         }
     }
@@ -187,12 +196,6 @@ mod tests {
     use super::PidlockState;
     use super::{Pidlock, PidlockError};
 
-    // This was removed from the library itself, but retained here
-    // to assert backwards compatibility with std::process::id
-    fn getpid() -> u32 {
-        unsafe { libc::getpid() as u32 }
-    }
-
     fn make_pid_path() -> String {
         let rand_string: String = thread_rng()
             .sample_iter(&Alphanumeric)
@@ -207,7 +210,7 @@ mod tests {
         let pid_path = make_pid_path();
         let pidfile = Pidlock::new(&pid_path);
 
-        assert_eq!(pidfile.pid, getpid());
+        assert_eq!(pidfile.pid, std::process::id());
         assert_eq!(pidfile.path, PathBuf::from(pid_path));
         assert_eq!(pidfile.state, PidlockState::New);
     }
