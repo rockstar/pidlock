@@ -114,7 +114,7 @@ impl Pidlock {
                 return Err(PidlockError::LockExists);
             }
         };
-        file.write_all(&format!("{}", self.pid).into_bytes()[..])
+        file.write_all(&self.pid.to_string().into_bytes()[..])
             .map_err(|_err| PidlockError::IOError)?;
 
         self.state = PidlockState::Acquired;
@@ -297,7 +297,7 @@ mod tests {
             .open(path.clone())
         {
             Ok(mut file) => {
-                file.write_all(&format!("{}", thread_rng().r#gen::<i32>()).into_bytes()[..])
+                file.write_all(&thread_rng().r#gen::<i32>().to_ne_bytes())
                     .unwrap();
             }
             Err(_) => {
