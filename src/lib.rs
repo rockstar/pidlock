@@ -6,6 +6,7 @@ use std::{fs, process};
 use log::warn;
 
 /// Errors that may occur during the `Pidlock` lifetime.
+#[non_exhaustive]
 #[derive(Debug, PartialEq)]
 pub enum PidlockError {
     #[doc = "A lock already exists"]
