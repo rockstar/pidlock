@@ -14,7 +14,6 @@ jobs:
         os: [Ubuntu, macOS, windows]
     env:
       RUSTFLAGS: "-D warnings"
-
     steps:
     - uses: actions/checkout@v3
     - name: Build
@@ -23,24 +22,34 @@ jobs:
       run: cargo test --verbose --all-features --all-targets
     - name: Build examples
       run: cargo test --examples
-  check:
+  clippy:
+    name: Run clippy
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+    - uses: actions/checkout@v3
+    - run: rustup component add clippy
+    - run: cargo clippy
+  deny:
+    name: Run cargo-deny
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+    - uses: actions/checkout@v3
+    - uses: EmbarkStudios/cargo-deny-action@v2
+      with:
+        command: check
+  format:
     name: Perform various checks
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-D warnings"
     steps:
     - uses: actions/checkout@v3
-    - name: Install clippy, rustfmt and cargo-deny
-      run: |
-        rustup component add clippy
-        rustup component add rustfmt
-        cargo install cargo-deny
-    - name: Check lint
-      run: cargo clippy
-    - name: Check format
-      run: cargo fmt -- --check
-    - name: Run cargo deny
-      run: cargo deny check
+    - run: rustup component add rustfmt
+    - run: cargo fmt -- --check
   semver-checks:
     name: Semver checks
     runs-on: ubuntu-latest
