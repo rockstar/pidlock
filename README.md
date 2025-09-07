@@ -30,7 +30,7 @@ use pidlock::Pidlock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create a new lock
-    let mut lock = Pidlock::new_validated("/tmp/my_app.pid")?;
+    let mut lock = Pidlock::new_validated("/run/lock/my_app.pid")?;
 
     // Try to acquire the lock
     match lock.acquire() {
@@ -64,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 use pidlock::Pidlock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let lock = Pidlock::new_validated("/tmp/my_app.pid")?;
+    let lock = Pidlock::new_validated("/run/lock/my_app.pid")?;
 
     // Check if a lock file exists
     if lock.exists() {
@@ -105,7 +105,7 @@ use pidlock::Pidlock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
-        let mut lock = Pidlock::new_validated("/tmp/my_app.pid")?;
+        let mut lock = Pidlock::new_validated("/run/lock/my_app.pid")?;
         lock.acquire()?;
         
         // Do work here...
