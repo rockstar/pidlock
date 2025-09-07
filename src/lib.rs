@@ -171,46 +171,83 @@ fn validate_pid(pid: i32) -> bool {
 
 /// Check whether a process exists, used to determine whether a pid file is stale.
 ///
-/// # Safety
+/// This function uses platform-specific system calls to check process existence
+/// without sending signals or affecting the target process.
 ///
-/// This function uses unsafe methods to determine process existence. The function
-/// itself is private, and the input is validated prior to call.
+/// # Arguments
+/// * `pid` - Process ID to check. Must be a positive integer within platform limits.
+///
+/// # Returns
+/// * `true` if the process exists and is accessible
+/// * `false` if the process doesn't exist, has exited, or we lack permissions
+///
+/// # Safety
+/// This function is safe when called with validated PIDs because:
+/// - On Windows: Uses safe Win32 APIs with proper handle management and error checking
+/// - On Unix: Uses the POSIX null signal (sig=0) which only performs permission checks
 fn process_exists(pid: i32) -> bool {
-    // SAFETY: This function validates the input and return values before
-    // continuing.
-    #[cfg(target_os = "windows")]
-    unsafe {
-        // If GetExitCodeProcess returns STILL_ACTIVE, then the process
-        // doesn't have an exit code (...or exited with code 259)
-        use windows_sys::Win32::{
-            Foundation::{CloseHandle, INVALID_HANDLE_VALUE, STILL_ACTIVE},
-            System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION},
-        };
-        let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
-
-        // SAFETY: We must check if OpenProcess failed before using the handle
-        if handle == 0 || handle == INVALID_HANDLE_VALUE {
-            // Process doesn't exist or we don't have permission to query it
-            return false;
-        }
-
-        let mut code = 0;
-        let success = GetExitCodeProcess(handle, &mut code);
-        CloseHandle(handle);
-
-        // SAFETY: Only return true if GetExitCodeProcess succeeded and process is still active
-        success != 0 && code == STILL_ACTIVE as u32
+    // Validate PID range before any unsafe operations
+    if !validate_pid(pid) {
+        return false;
     }
 
-    // SAFETY: This function is safe because it only checks for the existence
-    // of a process
+    #[cfg(target_os = "windows")]
+    {
+        // SAFETY: We use Windows APIs according to their documented contracts:
+        // - OpenProcess is called with valid flags and a validated positive PID
+        // - We check return values before using handles
+        // - CloseHandle is always called to prevent resource leaks
+        // - GetExitCodeProcess is only called with a valid handle
+        // The PID has already been validated by validate_pid() to be positive and within range
+        unsafe {
+            use windows_sys::Win32::{
+                Foundation::{CloseHandle, INVALID_HANDLE_VALUE, STILL_ACTIVE},
+                System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION},
+            };
+
+            let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
+
+            // Check if OpenProcess failed (returns 0 or INVALID_HANDLE_VALUE)
+            if handle == 0 || handle == INVALID_HANDLE_VALUE {
+                // Process doesn't exist or we don't have permission to query it
+                return false;
+            }
+
+            // Use RAII-style cleanup to ensure handle is always closed, even on panic
+            struct HandleGuard(isize);
+            impl Drop for HandleGuard {
+                fn drop(&mut self) {
+                    // SAFETY: We only create HandleGuard with valid handles from OpenProcess
+                    unsafe {
+                        CloseHandle(self.0);
+                    }
+                }
+            }
+            let _guard = HandleGuard(handle);
+
+            let mut exit_code = 0;
+            let success = GetExitCodeProcess(handle, &mut exit_code);
+
+            // Return true only if GetExitCodeProcess succeeded AND process is still active
+            // Note: STILL_ACTIVE (259) could theoretically be a real exit code, but it's
+            // extremely unlikely in practice. This is the documented Windows API pattern
+            // for checking if a process is still running. The risk of false positives
+            // (a process that actually exited with code 259) is negligible.
+            success != 0 && exit_code as i32 == STILL_ACTIVE
+        }
+    }
+
     #[cfg(not(target_os = "windows"))]
-    unsafe {
-        // From the POSIX standard: If sig is 0 (the null signal), error checking
-        // is performed but no signal is actually sent. The null signal can be
-        // used to check the validity of pid.
-        let result = libc::kill(pid, 0);
-        result == 0
+    {
+        // SAFETY: libc::kill with signal 0 is safe when called with a valid PID because:
+        // - Signal 0 (null signal) performs no actual signal delivery
+        // - It only checks if the process exists and we have permission to signal it
+        // - POSIX guarantees this is a safe operation that won't affect the target process
+        // - We've already validated the PID is within reasonable bounds
+        unsafe {
+            let result = libc::kill(pid, 0);
+            result == 0
+        }
     }
 }
 
@@ -925,5 +962,68 @@ mod tests {
             }
             Err(other) => panic!("Expected IOError, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_process_exists_safety_edge_cases() {
+        // This test verifies that our safety improvements correctly handle edge cases
+        // that could previously cause undefined behavior or resource leaks
+
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Test Case 1: Negative PID that would cause integer overflow on Windows
+        // This tests our fix for casting i32 to u32 without validation
+        temp_file.write_all(b"-2147483648").unwrap(); // i32::MIN
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Should safely handle the negative PID and clean up the file
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+
+        // Test Case 2: PID that exceeds platform limits
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        // Write a PID that exceeds our validate_pid limits
+        #[cfg(target_os = "linux")]
+        let invalid_pid = "4194305"; // Just above Linux limit
+
+        #[cfg(target_os = "macos")]
+        let invalid_pid = "100000"; // Just above macOS limit
+
+        #[cfg(target_os = "windows")]
+        let invalid_pid = "4294967296"; // Just above u32::MAX (would overflow)
+
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+        let invalid_pid = "100000"; // Above conservative default
+
+        temp_file.write_all(invalid_pid.as_bytes()).unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Should safely reject the invalid PID and clean up
+        assert_eq!(result, None);
+        assert!(!std::path::Path::new(&path).exists());
+
+        // Test Case 3: Verify our own PID is correctly detected (positive test)
+        let mut temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        temp_file
+            .write_all(std::process::id().to_string().as_bytes())
+            .unwrap();
+        temp_file.flush().unwrap();
+
+        let pidfile = Pidlock::new(&path);
+        let result = pidfile.get_owner().unwrap();
+        // Should correctly identify our own process
+        assert_eq!(result, Some(std::process::id() as i32));
+
+        // Clean up
+        std::fs::remove_file(&path).unwrap();
     }
 }
