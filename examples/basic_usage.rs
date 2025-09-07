@@ -1,10 +1,10 @@
 #![allow(clippy::print_stdout)]
-//! Basic usage example for pidlock
+//! Basic usage example for pidlock with type-safe state management
 //!
-//! This example demonstrates the most common use case: ensuring only one instance
-//! of a program runs at a time.
+//! This example demonstrates the new type-safe API that prevents invalid state
+//! transitions at compile time. It also shows the basic workflow and error handling.
 
-use pidlock::{Pidlock, PidlockError};
+use pidlock::{AcquireError, New, Pidlock, Released};
 use std::env;
 use std::process;
 use std::thread;
@@ -29,35 +29,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Attempting to acquire lock at: {:?}", lock_path);
 
-    // Create and try to acquire the lock
-    let mut lock = Pidlock::new_validated(&lock_path)?;
+    // Create a new lock - note the type is Pidlock<New>
+    let lock: Pidlock<New> = Pidlock::new(&lock_path)?;
+    println!("Lock created in New state");
 
     match lock.acquire() {
-        Ok(()) => {
+        Ok(acquired_lock) => {
             println!(
-                "✓ Lock acquired successfully! Process ID: {}",
+                "✓ Lock acquired successfully! Process ID: {} (Type: Pidlock<Acquired>)",
                 process::id()
             );
-            println!("This program will run for 10 seconds...");
+
+            // We can check that we're the owner
+            if let Some(owner_pid) = acquired_lock.get_owner()? {
+                println!("Lock is owned by PID: {}", owner_pid);
+                assert_eq!(owner_pid, std::process::id() as i32);
+            }
+
+            println!("This program will run for 5 seconds...");
 
             // Simulate some work
-            for i in 1..=10 {
-                println!("Working... {}/10", i);
+            for i in 1..=5 {
+                println!("Working... {}/5", i);
                 thread::sleep(Duration::from_secs(1));
             }
 
             println!("Work completed! Releasing lock...");
-            lock.release()?;
-            println!("✓ Lock released successfully");
+
+            // Release the lock - type changes to Pidlock<Released>
+            let released_lock: Pidlock<Released> = acquired_lock.release()?;
+            println!("✓ Lock released successfully (Type: Pidlock<Released>)");
+
+            // Verify the lock file is gone
+            assert!(!released_lock.exists());
+            println!("Lock file has been removed");
+
+            // Type Safety Demonstration:
+            // These would not compile - invalid state transitions:
+            // let reacquired = released_lock.acquire(); // Compile error! Cannot acquire from Released state
+            // let re_released = released_lock.release(); // Compile error! Cannot release from Released state
+            // let bad_release = lock.release(); // Compile error! `lock` was moved in acquire()
+            // let bad_check = acquired_lock.exists(); // Compile error! `acquired_lock` was moved in release()
+
+            println!("✓ Type safety: Invalid operations prevented at compile time!")
         }
-        Err(PidlockError::LockExists) => {
+        Err(AcquireError::LockExists) => {
             println!("✗ Another instance is already running!");
 
             // Try to get information about the existing lock
-            match lock.get_owner()? {
+            // Note: we need to create another lock instance to check status
+            let check_lock: Pidlock<New> = Pidlock::new(&lock_path)?;
+            match check_lock.get_owner()? {
                 Some(pid) => {
                     println!("  Existing lock is held by process ID: {}", pid);
-                    match lock.is_active()? {
+                    match check_lock.is_active()? {
                         true => println!("  The process is still active"),
                         false => println!("  The process appears to be dead (stale lock)"),
                     }
@@ -73,5 +98,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    println!("Example completed successfully!");
     Ok(())
 }

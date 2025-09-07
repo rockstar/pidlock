@@ -13,6 +13,7 @@ A library for creating and managing PID-based file locks, providing a simple and
 - **Path validation**: Ensures lock file paths are valid across platforms
 - **Safe cleanup**: Automatically releases locks when the `Pidlock` is dropped
 - **Comprehensive error handling**: Detailed error types for different failure scenarios
+- **Type-safe state management**: Compile-time prevention of invalid state transitions
 
 ## Quick Start
 
@@ -23,31 +24,62 @@ Add this to your `Cargo.toml`:
 pidlock = "0.2"
 ```
 
-## Basic Usage
+## Type-Safe Usage (Recommended)
+
+Starting with version 0.2.0, pidlock uses Rust's type system to prevent invalid state transitions at compile time:
 
 ```rust
-use pidlock::Pidlock;
+use pidlock::{Pidlock, New, Acquired, Released, AcquireError};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Create a new lock
-    let mut lock = Pidlock::new_validated("/run/lock/my_app.pid")?;
+    // Create a new lock - starts in New state
+    let lock: Pidlock<New> = Pidlock::new("/run/lock/my_app.pid")?;
 
-    // Try to acquire the lock
+    // Try to acquire the lock - transitions to Acquired state
     match lock.acquire() {
-        Ok(()) => {
+        Ok(acquired_lock) => {
             println!("Lock acquired successfully!");
             
             // Do your work here...
             
-            // Explicitly release the lock (optional - it's auto-released on drop)
-            lock.release()?;
+            // Release the lock - transitions to Released state
+            let _released_lock: Pidlock<Released> = acquired_lock.release()?;
+            println!("Lock released successfully!");
         }
-        Err(pidlock::PidlockError::LockExists) => {
+        Err(AcquireError::LockExists) => {
             println!("Another instance is already running");
             std::process::exit(1);
         }
         Err(e) => {
             eprintln!("Failed to acquire lock: {}", e);
+            std::process::exit(1);
+        }
+    }
+    
+    Ok(())
+}
+```
+
+### Compile-Time Safety
+
+The type system prevents common mistakes:
+
+```rust
+use pidlock::{Pidlock, New, Acquired, Released};
+
+// This won't compile - cannot acquire from Released state:
+// let released_lock: Pidlock<Released> = // ...
+// let reacquired = released_lock.acquire(); // ERROR!
+
+// This won't compile - cannot release from New state:  
+// let lock: Pidlock<New> = // ...
+// let released = lock.release(); // ERROR!
+
+// This won't compile - cannot use moved value:
+// let lock: Pidlock<New> = // ...
+// let acquired = lock.acquire()?;
+// println!("{}", lock.exists()); // ERROR! lock was moved
+```
             std::process::exit(1);
         }
     }
@@ -64,7 +96,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 use pidlock::Pidlock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let lock = Pidlock::new_validated("/run/lock/my_app.pid")?;
+    let lock = Pidlock::new("/run/lock/my_app.pid")?;
 
     // Check if a lock file exists
     if lock.exists() {
@@ -84,13 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### Error Handling
 
 ```rust
-use pidlock::{Pidlock, PidlockError, InvalidPathError};
+use pidlock::{Pidlock, NewError, InvalidPathError};
 
 fn main() {
-    let result = Pidlock::new_validated("invalid<path>");
+    let result = Pidlock::new("invalid<path>");
     match result {
         Ok(_) => println!("Path is valid"),
-        Err(PidlockError::InvalidPath(InvalidPathError::ProblematicCharacter { character, filename })) => {
+        Err(NewError::InvalidPath(InvalidPathError::ProblematicCharacter { character, filename })) => {
             println!("Invalid character '{}' in filename: {}", character, filename);
         }
         Err(e) => println!("Other error: {}", e),
@@ -105,8 +137,8 @@ use pidlock::Pidlock;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
-        let mut lock = Pidlock::new_validated("/run/lock/my_app.pid")?;
-        lock.acquire()?;
+        let lock = Pidlock::new("/run/lock/my_app.pid")?;
+        let acquired_lock = lock.acquire()?;
         
         // Do work here...
         // Lock is automatically released when it goes out of scope
@@ -121,16 +153,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 If you're upgrading from version 0.1.x:
 
-- Replace `Pidlock::new()` with `Pidlock::new_validated()` for better error handling
-- Handle the additional `Result` type returned by `new_validated()`
-- Consider the improved error types for more specific error handling
+- Replace `Pidlock::new()` with `Pidlock::new()` (no change needed for the method name)
+- The API now uses specific error types (`NewError`, `AcquireError`, etc.) instead of a unified `PidlockError`
+- Consider the improved type-safe state management for better compile-time safety
 
 ```rust
 // Old (0.1.x)
 let mut lock = pidlock::Pidlock::new("/path/to/pidfile.pid");
 
 // New (0.2.x)
-let mut lock = pidlock::Pidlock::new_validated("/path/to/pidfile.pid")?;
+let lock = pidlock::Pidlock::new("/path/to/pidfile.pid")?;
+let acquired_lock = lock.acquire()?;
 ```
 
 ## Platform Considerations

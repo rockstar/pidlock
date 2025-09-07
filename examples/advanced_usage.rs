@@ -4,7 +4,7 @@
 //! This example demonstrates more sophisticated lock management including
 //! error handling, lock status checking, and graceful handling of stale locks.
 
-use pidlock::{InvalidPathError, Pidlock, PidlockError};
+use pidlock::{AcquireError, Acquired, InvalidPathError, New, NewError, Pidlock, Released};
 use std::env;
 use std::process;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -18,11 +18,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "run" => run_with_lock(),
         "check" => check_lock_status(),
         "cleanup" => cleanup_stale_locks(),
+        "conversions" => demonstrate_type_conversions(),
         _ => {
-            eprintln!("Usage: {} [run|check|cleanup]", args[0]);
-            eprintln!("  run     - Run the program with lock protection");
-            eprintln!("  check   - Check the status of existing locks");
-            eprintln!("  cleanup - Clean up any stale lock files");
+            eprintln!("Usage: {} [run|check|cleanup|conversions]", args[0]);
+            eprintln!("  run         - Run the program with lock protection");
+            eprintln!("  check       - Check the status of existing locks");
+            eprintln!("  cleanup     - Clean up any stale lock files");
+            eprintln!("  conversions - Demonstrate type conversion patterns");
             process::exit(1);
         }
     }
@@ -33,13 +35,13 @@ fn run_with_lock() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("Creating lock at: {:?}", lock_path);
 
-    let mut lock = match Pidlock::new_validated(&lock_path) {
+    let lock = match Pidlock::new(&lock_path) {
         Ok(lock) => lock,
-        Err(PidlockError::InvalidPath(InvalidPathError::EmptyPath)) => {
+        Err(NewError::InvalidPath(InvalidPathError::EmptyPath)) => {
             eprintln!("Error: Lock path cannot be empty");
             process::exit(1);
         }
-        Err(PidlockError::InvalidPath(InvalidPathError::ProblematicCharacter {
+        Err(NewError::InvalidPath(InvalidPathError::ProblematicCharacter {
             character,
             filename,
         })) => {
@@ -49,7 +51,7 @@ fn run_with_lock() -> Result<(), Box<dyn std::error::Error>> {
             );
             process::exit(1);
         }
-        Err(PidlockError::InvalidPath(InvalidPathError::ReservedName { filename })) => {
+        Err(NewError::InvalidPath(InvalidPathError::ReservedName { filename })) => {
             eprintln!("Error: '{}' is a reserved filename on Windows", filename);
             process::exit(1);
         }
@@ -60,18 +62,22 @@ fn run_with_lock() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match lock.acquire() {
-        Ok(()) => {
+        Ok(acquired_lock) => {
             println!("✓ Lock acquired successfully!");
             simulate_work()?;
-            lock.release()?;
+            let released_lock = acquired_lock.release()?;
             println!("✓ Lock released successfully");
+            // We could use released_lock here if needed, but dropping it is fine
+            drop(released_lock);
         }
-        Err(PidlockError::LockExists) => {
+        Err(AcquireError::LockExists) => {
             println!("✗ Lock already exists");
-            handle_existing_lock(&lock)?;
+            // Create a new lock instance for inspection since the original was consumed
+            let inspection_lock = Pidlock::new(&lock_path)?;
+            handle_existing_lock(&inspection_lock)?;
             process::exit(1);
         }
-        Err(PidlockError::IOError(io_err)) => {
+        Err(AcquireError::IOError(io_err)) => {
             eprintln!("✗ I/O error while acquiring lock: {}", io_err);
             process::exit(1);
         }
@@ -86,7 +92,7 @@ fn run_with_lock() -> Result<(), Box<dyn std::error::Error>> {
 
 fn check_lock_status() -> Result<(), Box<dyn std::error::Error>> {
     let lock_path = get_lock_path()?;
-    let lock = Pidlock::new_validated(&lock_path)?;
+    let lock = Pidlock::new(&lock_path)?;
 
     println!("Checking lock status at: {:?}", lock_path);
 
@@ -120,7 +126,7 @@ fn check_lock_status() -> Result<(), Box<dyn std::error::Error>> {
 
 fn cleanup_stale_locks() -> Result<(), Box<dyn std::error::Error>> {
     let lock_path = get_lock_path()?;
-    let lock = Pidlock::new_validated(&lock_path)?;
+    let lock = Pidlock::new(&lock_path)?;
 
     println!("Checking for stale locks at: {:?}", lock_path);
 
@@ -148,7 +154,46 @@ fn cleanup_stale_locks() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle_existing_lock(lock: &Pidlock) -> Result<(), Box<dyn std::error::Error>> {
+fn demonstrate_type_conversions() -> Result<(), Box<dyn std::error::Error>> {
+    println!("=== Type Conversion Demonstrations ===");
+
+    let lock_path = get_lock_path()?;
+
+    // Create a new lock - explicit type annotation shows the state
+    let new_lock: Pidlock<New> = Pidlock::new(&lock_path)?;
+    println!("✓ Created Pidlock<New>");
+
+    // Standard workflow with explicit type annotations
+    println!("Converting Pidlock<New> -> Pidlock<Acquired> via acquire()...");
+    let acquired_lock: Pidlock<Acquired> = new_lock.acquire()?;
+    println!("✓ Conversion successful - now have Pidlock<Acquired>");
+
+    // Check that we're the owner
+    if let Some(owner_pid) = acquired_lock.get_owner()? {
+        println!("  Lock is owned by PID: {}", owner_pid);
+        assert_eq!(owner_pid, std::process::id() as i32);
+    }
+
+    println!("Converting Pidlock<Acquired> -> Pidlock<Released> via release()...");
+    let released_lock: Pidlock<Released> = acquired_lock.release()?;
+    println!("✓ Conversion successful - now have Pidlock<Released>");
+
+    // Verify final state
+    assert!(!released_lock.exists());
+    println!("✓ Lock file properly removed during release");
+
+    println!("\n=== Type Safety Guarantees ===");
+    println!("The following operations would cause COMPILE-TIME errors:");
+    println!("  // released_lock.acquire() - Cannot acquire from Released state");
+    println!("  // released_lock.release() - Cannot release from Released state");
+    println!("  // new_lock.release() - Cannot release from New state");
+    println!("  // new_lock.exists() - Cannot use moved value after acquire()");
+    println!("✓ Type system prevents invalid state transitions!");
+
+    Ok(())
+}
+
+fn handle_existing_lock(lock: &Pidlock<New>) -> Result<(), Box<dyn std::error::Error>> {
     match lock.get_owner()? {
         Some(pid) => {
             println!("  Lock is held by PID: {}", pid);
