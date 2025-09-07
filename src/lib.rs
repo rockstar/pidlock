@@ -426,7 +426,6 @@ impl Drop for Pidlock {
 
 #[cfg(test)]
 mod tests {
-    #![allow(deprecated)]
     use std::io::Write;
     use std::path::PathBuf;
 
@@ -445,7 +444,7 @@ mod tests {
     fn test_new() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let pidfile = Pidlock::new(pid_path);
+        let pidfile = Pidlock::new_validated(pid_path).unwrap();
 
         assert_eq!(pidfile.pid, std::process::id());
         assert_eq!(pidfile.path, PathBuf::from(pid_path));
@@ -456,7 +455,7 @@ mod tests {
     fn test_acquire_and_release() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new(pid_path);
+        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
         pidfile.acquire().unwrap();
 
         assert_eq!(pidfile.state, PidlockState::Acquired);
@@ -470,10 +469,10 @@ mod tests {
     fn test_acquire_lock_exists() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut orig_pidfile = Pidlock::new(pid_path);
+        let mut orig_pidfile = Pidlock::new_validated(pid_path).unwrap();
         orig_pidfile.acquire().unwrap();
 
-        let mut pidfile = Pidlock::new(orig_pidfile.path.to_str().unwrap());
+        let mut pidfile = Pidlock::new_validated(orig_pidfile.path.to_str().unwrap()).unwrap();
         match pidfile.acquire() {
             Err(err) => {
                 orig_pidfile.release().unwrap();
@@ -490,7 +489,7 @@ mod tests {
     fn test_acquire_already_acquired() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new(pid_path);
+        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
         pidfile.acquire().unwrap();
         match pidfile.acquire() {
             Err(err) => {
@@ -508,7 +507,7 @@ mod tests {
     fn test_release_bad_state() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new(pid_path);
+        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
         match pidfile.release() {
             Err(err) => {
                 assert_eq!(err, PidlockError::InvalidState);
@@ -523,7 +522,7 @@ mod tests {
     fn test_locked() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new(pid_path);
+        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
         pidfile.acquire().unwrap();
         assert!(pidfile.locked());
     }
@@ -532,7 +531,7 @@ mod tests {
     fn test_locked_not_locked() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let pidfile = Pidlock::new(pid_path);
+        let pidfile = Pidlock::new_validated(pid_path).unwrap();
         assert!(!pidfile.locked());
     }
 
@@ -547,7 +546,7 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let mut pidfile = Pidlock::new(&path);
+        let mut pidfile = Pidlock::new_validated(&path).unwrap();
         pidfile.acquire().unwrap();
         assert_eq!(pidfile.state, PidlockState::Acquired);
     }
@@ -565,7 +564,7 @@ mod tests {
         temp_file.write_all(&contents.into_bytes()).unwrap();
         temp_file.flush().unwrap();
 
-        let mut pidfile = Pidlock::new(&path);
+        let mut pidfile = Pidlock::new_validated(&path).unwrap();
         pidfile.acquire().unwrap();
         assert_eq!(pidfile.state, PidlockState::Acquired);
     }
@@ -580,7 +579,7 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let mut pidfile = Pidlock::new(&path);
+        let mut pidfile = Pidlock::new_validated(&path).unwrap();
         pidfile.acquire().unwrap();
         assert_eq!(pidfile.state, PidlockState::Acquired);
     }
@@ -592,7 +591,7 @@ mod tests {
 
         // Create and acquire a lock in a scope
         {
-            let mut pidfile = Pidlock::new(&path);
+            let mut pidfile = Pidlock::new_validated(&path).unwrap();
             pidfile.acquire().unwrap();
             assert_eq!(pidfile.state, PidlockState::Acquired);
 
@@ -613,7 +612,7 @@ mod tests {
 
         // Create a lock but don't acquire it
         {
-            let _pidfile = Pidlock::new(&path);
+            let _pidfile = Pidlock::new_validated(&path).unwrap();
             // Lock is not acquired, so drop should not try to remove anything
         }
 
@@ -622,7 +621,7 @@ mod tests {
 
         // Now create a lock, acquire and manually release it
         {
-            let mut pidfile = Pidlock::new(&path);
+            let mut pidfile = Pidlock::new_validated(&path).unwrap();
             pidfile.acquire().unwrap();
             pidfile.release().unwrap();
             assert_eq!(pidfile.state, PidlockState::Released);
@@ -639,7 +638,7 @@ mod tests {
         let temp_file = make_temp_file();
         let path = temp_file.path().to_string_lossy().to_string();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         assert_eq!(result, None);
     }
@@ -650,7 +649,7 @@ mod tests {
         let path = temp_file.path().to_string_lossy().to_string();
 
         // First create a lock with our own PID
-        let mut pidfile = Pidlock::new(&path);
+        let mut pidfile = Pidlock::new_validated(&path).unwrap();
         pidfile.acquire().unwrap();
 
         // Now test get_owner returns our PID
@@ -669,7 +668,7 @@ mod tests {
         temp_file.write_all(b"").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Empty file should be cleaned up and return None
         assert_eq!(result, None);
@@ -685,7 +684,7 @@ mod tests {
         temp_file.write_all(b"   \n  \t  \r\n  ").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Whitespace-only file should be cleaned up and return None
         assert_eq!(result, None);
@@ -701,7 +700,7 @@ mod tests {
         temp_file.write_all(b"-12345").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Negative PID should be cleaned up and return None
         assert_eq!(result, None);
@@ -720,7 +719,7 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Large PID should be cleaned up since it likely doesn't exist
         assert_eq!(result, None);
@@ -736,7 +735,7 @@ mod tests {
         temp_file.write_all(b"0").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
 
         // PID 0 behavior is system-dependent:
@@ -767,7 +766,7 @@ mod tests {
         temp_file.write_all(b"12345 extra content").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should parse the PID part and clean up since 12345 likely doesn't exist
         assert_eq!(result, None);
@@ -780,11 +779,11 @@ mod tests {
         let path = temp_file.path().to_string_lossy().to_string();
 
         // First lock should succeed
-        let mut lock1 = Pidlock::new(&path);
+        let mut lock1 = Pidlock::new_validated(&path).unwrap();
         assert!(lock1.acquire().is_ok());
 
         // Second lock should fail with LockExists
-        let mut lock2 = Pidlock::new(&path);
+        let mut lock2 = Pidlock::new_validated(&path).unwrap();
         match lock2.acquire() {
             Err(PidlockError::LockExists) => {} // Expected
             other => panic!("Expected LockExists, got {:?}", other),
@@ -808,7 +807,7 @@ mod tests {
         temp_file.flush().unwrap();
 
         // Acquiring should clean up the stale file and succeed
-        let mut pidfile = Pidlock::new(&path);
+        let mut pidfile = Pidlock::new_validated(&path).unwrap();
         assert!(pidfile.acquire().is_ok());
         assert_eq!(pidfile.state, PidlockState::Acquired);
 
@@ -914,7 +913,7 @@ mod tests {
         temp_file.write_all(b"-500").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Invalid PID should be cleaned up
         assert_eq!(result, None);
@@ -929,7 +928,7 @@ mod tests {
         let temp_file = make_temp_file();
         let path = temp_file.path().to_string_lossy().to_string();
 
-        let mut pidfile = Pidlock::new(&path);
+        let mut pidfile = Pidlock::new_validated(&path).unwrap();
         pidfile.acquire().unwrap();
 
         // Check that file has correct permissions (600 - owner read/write only)
@@ -948,7 +947,7 @@ mod tests {
         let temp_file = make_temp_file();
         let path = temp_file.path().to_string_lossy().to_string();
 
-        let mut pidfile = Pidlock::new(&path);
+        let mut pidfile = Pidlock::new_validated(&path).unwrap();
         pidfile.acquire().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
@@ -973,25 +972,34 @@ mod tests {
     #[test]
     fn test_acquire_detailed_error_handling() {
         // Test that we get proper error details instead of generic IOError
-        let mut pidfile = Pidlock::new("/root/cannot_create_here/test.pid");
+        // Test the case where we try to create a lock file that already exists
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
 
-        let result = pidfile.acquire();
+        // First, create and acquire a lock
+        let mut first_lock = Pidlock::new_validated(&path).unwrap();
+        first_lock.acquire().unwrap();
+
+        // Now try to create a second lock on the same file
+        let mut second_lock = Pidlock::new_validated(&path).unwrap();
+        let result = second_lock.acquire();
+
         match result {
+            Err(PidlockError::LockExists) => {
+                // This is the expected behavior - proper error type
+            }
             Ok(_) => {
-                // This might actually succeed in some test environments
-                // so we don't fail the test
+                // This shouldn't happen, but if it does, clean up
+                let _ = second_lock.release();
+                panic!("Expected LockExists error, but acquire succeeded");
             }
-            Err(PidlockError::IOError(io_err)) => {
-                // Verify we get detailed error information
-                assert!(!io_err.to_string().is_empty());
-                // Should be a permission denied or not found error
-                assert!(matches!(
-                    io_err.kind(),
-                    std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::NotFound
-                ));
+            Err(other) => {
+                panic!("Expected LockExists, got {:?}", other);
             }
-            Err(other) => panic!("Expected IOError, got {:?}", other),
         }
+
+        // Clean up
+        first_lock.release().unwrap();
     }
 
     #[test]
@@ -1007,7 +1015,7 @@ mod tests {
         temp_file.write_all(b"-2147483648").unwrap(); // i32::MIN
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should safely handle the negative PID and clean up the file
         assert_eq!(result, None);
@@ -1033,7 +1041,7 @@ mod tests {
         temp_file.write_all(invalid_pid.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should safely reject the invalid PID and clean up
         assert_eq!(result, None);
@@ -1048,7 +1056,7 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new(&path);
+        let pidfile = Pidlock::new_validated(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should correctly identify our own process
         assert_eq!(result, Some(std::process::id() as i32));
