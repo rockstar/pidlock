@@ -2,21 +2,49 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::{fs, process};
 
+use thiserror::Error;
+
 #[cfg(feature = "log")]
 use log::warn;
 
+/// Specific types of path validation errors
+#[derive(Debug, Error)]
+pub enum InvalidPathError {
+    #[error("Path cannot be empty")]
+    EmptyPath,
+
+    #[error("Filename '{filename}' is reserved on Windows")]
+    ReservedName { filename: String },
+
+    #[error("Filename contains problematic character '{character}': {filename}")]
+    ProblematicCharacter { character: char, filename: String },
+
+    #[error("Filename contains control characters: {filename}")]
+    ControlCharacters { filename: String },
+
+    #[error("Cannot create parent directory {path}")]
+    ParentDirectoryCreationFailed {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
 /// Errors that may occur during the `Pidlock` lifetime.
+#[derive(Debug, Error)]
 #[non_exhaustive]
-#[derive(Debug)]
 pub enum PidlockError {
-    #[doc = "A lock already exists"]
+    #[error("A lock already exists")]
     LockExists,
-    #[doc = "An operation was attempted in the wrong state, e.g. releasing before acquiring."]
+
+    #[error("An operation was attempted in the wrong state, e.g. releasing before acquiring")]
     InvalidState,
-    #[doc = "An I/O error occurred"]
-    IOError(std::io::Error),
-    #[doc = "Invalid path provided for lock file"]
-    InvalidPath(String),
+
+    #[error("An I/O error occurred")]
+    IOError(#[from] std::io::Error),
+
+    #[error("Invalid path provided for lock file")]
+    InvalidPath(#[from] InvalidPathError),
 }
 
 impl PartialEq for PidlockError {
@@ -25,18 +53,16 @@ impl PartialEq for PidlockError {
             (PidlockError::LockExists, PidlockError::LockExists) => true,
             (PidlockError::InvalidState, PidlockError::InvalidState) => true,
             (PidlockError::IOError(a), PidlockError::IOError(b)) => {
-                // Compare IO errors by their kind and to_string representation
-                a.kind() == b.kind() && a.to_string() == b.to_string()
+                // Compare IO errors by their kind only (more reliable than string comparison)
+                a.kind() == b.kind()
             }
-            (PidlockError::InvalidPath(a), PidlockError::InvalidPath(b)) => a == b,
+            (PidlockError::InvalidPath(a), PidlockError::InvalidPath(b)) => {
+                // Compare InvalidPathError by discriminant only for now
+                // This is a simplified comparison since InvalidPathError may contain non-comparable fields
+                std::mem::discriminant(a) == std::mem::discriminant(b)
+            }
             _ => false,
         }
-    }
-}
-
-impl From<std::io::Error> for PidlockError {
-    fn from(err: std::io::Error) -> Self {
-        PidlockError::IOError(err)
     }
 }
 
@@ -67,9 +93,7 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
 
     // Check for empty path
     if path.as_os_str().is_empty() {
-        return Err(PidlockError::InvalidPath(
-            "Path cannot be empty".to_string(),
-        ));
+        return Err(PidlockError::InvalidPath(InvalidPathError::EmptyPath));
     }
 
     // Check for common problematic characters in filename
@@ -90,10 +114,9 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
                 .unwrap_or(&filename_str)
                 .to_uppercase();
             if reserved_names.contains(&base_name.as_str()) {
-                return Err(PidlockError::InvalidPath(format!(
-                    "Filename '{}' is reserved on Windows",
-                    filename_str
-                )));
+                return Err(PidlockError::InvalidPath(InvalidPathError::ReservedName {
+                    filename: filename_str.to_string(),
+                }));
             }
         }
 
@@ -101,19 +124,22 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
         let problematic_chars = ['<', '>', ':', '"', '|', '?', '*'];
         for &ch in &problematic_chars {
             if filename_str.contains(ch) {
-                return Err(PidlockError::InvalidPath(format!(
-                    "Filename contains problematic character '{}': {}",
-                    ch, filename_str
-                )));
+                return Err(PidlockError::InvalidPath(
+                    InvalidPathError::ProblematicCharacter {
+                        character: ch,
+                        filename: filename_str.to_string(),
+                    },
+                ));
             }
         }
 
         // Check for control characters
         if filename_str.chars().any(|c| c.is_control()) {
-            return Err(PidlockError::InvalidPath(format!(
-                "Filename contains control characters: {}",
-                filename_str
-            )));
+            return Err(PidlockError::InvalidPath(
+                InvalidPathError::ControlCharacters {
+                    filename: filename_str.to_string(),
+                },
+            ));
         }
     }
 
@@ -123,11 +149,12 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
     {
         // Check if we can potentially create the directory
         if let Err(e) = fs::create_dir_all(parent) {
-            return Err(PidlockError::InvalidPath(format!(
-                "Cannot create parent directory {}: {}",
-                parent.display(),
-                e
-            )));
+            return Err(PidlockError::InvalidPath(
+                InvalidPathError::ParentDirectoryCreationFailed {
+                    path: parent.display().to_string(),
+                    source: e,
+                },
+            ));
         }
     }
 
@@ -874,6 +901,134 @@ mod tests {
                 Err(PidlockError::InvalidPath(_)) => {} // Expected
                 other => panic!("Expected InvalidPath for '{}', got {:?}", path, other),
             }
+        }
+    }
+
+    #[test]
+    fn test_error_display_and_chaining() {
+        use super::InvalidPathError;
+        use std::error::Error;
+
+        // Test InvalidPathError display
+        let empty_path_err = InvalidPathError::EmptyPath;
+        assert_eq!(empty_path_err.to_string(), "Path cannot be empty");
+
+        let reserved_name_err = InvalidPathError::ReservedName {
+            filename: "CON.pid".to_string(),
+        };
+        assert_eq!(
+            reserved_name_err.to_string(),
+            "Filename 'CON.pid' is reserved on Windows"
+        );
+
+        let problematic_char_err = InvalidPathError::ProblematicCharacter {
+            character: '<',
+            filename: "test<file.pid".to_string(),
+        };
+        assert_eq!(
+            problematic_char_err.to_string(),
+            "Filename contains problematic character '<': test<file.pid"
+        );
+
+        // Test PidlockError display
+        let lock_exists_err = PidlockError::LockExists;
+        assert_eq!(lock_exists_err.to_string(), "A lock already exists");
+
+        let invalid_state_err = PidlockError::InvalidState;
+        assert_eq!(
+            invalid_state_err.to_string(),
+            "An operation was attempted in the wrong state, e.g. releasing before acquiring"
+        );
+
+        // Test error chaining with InvalidPath
+        let invalid_path_err = PidlockError::InvalidPath(empty_path_err);
+        assert_eq!(
+            invalid_path_err.to_string(),
+            "Invalid path provided for lock file"
+        );
+
+        // Verify error source chain
+        if let PidlockError::InvalidPath(inner) = &invalid_path_err {
+            assert_eq!(inner.to_string(), "Path cannot be empty");
+        }
+
+        // Test that std::error::Error trait is implemented
+        let _: &dyn Error = &invalid_path_err;
+        let _: &dyn Error = &lock_exists_err;
+
+        // Test IO error chaining (create a simple IO error)
+        let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test error");
+        let parent_dir_err = InvalidPathError::ParentDirectoryCreationFailed {
+            path: "/some/path".to_string(),
+            source: io_error,
+        };
+
+        // Verify error chaining works
+        assert_eq!(
+            parent_dir_err.to_string(),
+            "Cannot create parent directory /some/path"
+        );
+        assert!(parent_dir_err.source().is_some());
+
+        let pidlock_err = PidlockError::InvalidPath(parent_dir_err);
+        assert!(pidlock_err.source().is_some());
+    }
+
+    #[test]
+    fn test_improved_partial_eq() {
+        use super::InvalidPathError;
+
+        // Test that PartialEq works correctly with the new implementation
+
+        // Test simple variants
+        assert_eq!(PidlockError::LockExists, PidlockError::LockExists);
+        assert_eq!(PidlockError::InvalidState, PidlockError::InvalidState);
+        assert_ne!(PidlockError::LockExists, PidlockError::InvalidState);
+
+        // Test IOError comparison by kind only
+        let io_err1 = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "message 1");
+        let io_err2 = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "message 2");
+        let io_err3 = std::io::Error::new(std::io::ErrorKind::NotFound, "message 3");
+
+        let pidlock_io1 = PidlockError::IOError(io_err1);
+        let pidlock_io2 = PidlockError::IOError(io_err2);
+        let pidlock_io3 = PidlockError::IOError(io_err3);
+
+        // Same error kind should be equal (even with different messages)
+        assert_eq!(pidlock_io1, pidlock_io2);
+        // Different error kinds should not be equal
+        assert_ne!(pidlock_io1, pidlock_io3);
+
+        // Test InvalidPath comparison by discriminant
+        let invalid_path1 = PidlockError::InvalidPath(InvalidPathError::EmptyPath);
+        let invalid_path2 = PidlockError::InvalidPath(InvalidPathError::EmptyPath);
+        let invalid_path3 = PidlockError::InvalidPath(InvalidPathError::ReservedName {
+            filename: "CON.pid".to_string(),
+        });
+
+        // Same discriminant should be equal
+        assert_eq!(invalid_path1, invalid_path2);
+        // Different discriminants should not be equal
+        assert_ne!(invalid_path1, invalid_path3);
+    }
+
+    #[test]
+    fn test_error_downcasting() {
+        use super::InvalidPathError;
+        use std::error::Error;
+
+        // Test error downcasting with proper Error trait implementation
+        let invalid_path_err = PidlockError::InvalidPath(InvalidPathError::EmptyPath);
+
+        // Convert to trait object
+        let err_trait: &dyn Error = &invalid_path_err;
+
+        // Test downcasting
+        assert!(err_trait.downcast_ref::<PidlockError>().is_some());
+
+        // Test source chain navigation
+        if let Some(source) = err_trait.source() {
+            assert!(source.downcast_ref::<InvalidPathError>().is_some());
         }
     }
 
