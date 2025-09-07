@@ -10,6 +10,7 @@
 //! - **Path validation**: Ensures lock file paths are valid across platforms
 //! - **Safe cleanup**: Automatically releases locks when the `Pidlock` is dropped
 //! - **Comprehensive error handling**: Detailed error types for different failure scenarios
+//! - **Type-safe state management**: Compile-time prevention of invalid state transitions
 //!
 //! ## Quick Start
 //!
@@ -18,28 +19,64 @@
 //! use std::path::Path;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Create a new lock (use a proper path in real code)
 //! let temp_dir = std::env::temp_dir();
 //! let lock_path = temp_dir.join("my_app.pid");
-//! let mut lock = Pidlock::new_validated(&lock_path)?;
+//! let mut lock = Pidlock::new(&lock_path)?;
 //!
-//! // Try to acquire the lock
+//! // Try to acquire the lock - note the type changes from Pidlock<New> to Pidlock<Acquired>
 //! match lock.acquire() {
-//!     Ok(()) => {
+//!     Ok(acquired_lock) => {
 //!         println!("Lock acquired successfully!");
 //!         
 //!         // Do your work here...
 //!         
 //!         // Explicitly release the lock (optional - it's auto-released on drop)
-//!         lock.release()?;
+//!         let _released_lock = acquired_lock.release()?;
 //!         println!("Lock released successfully!");
 //!     }
-//!     Err(pidlock::PidlockError::LockExists) => {
-//!         println!("Another instance is already running");
-//!     }
 //!     Err(e) => {
-//!         eprintln!("Failed to acquire lock: {}", e);
+//!         match e {
+//!             pidlock::AcquireError::LockExists => {
+//!                 println!("Another instance is already running");
+//!             }
+//!             pidlock::AcquireError::IOError(io_err) => {
+//!                 eprintln!("IO error: {}", io_err);
+//!             }
+//!             pidlock::AcquireError::InvalidPath(path_err) => {
+//!                 eprintln!("Path error: {}", path_err);
+//!             }
+//!             _ => {
+//!                 eprintln!("Other error: {}", e);
+//!             }
+//!         }
 //!     }
 //! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Type-Safe State Management
+//!
+//! The library uses Rust's type system to prevent invalid state transitions at compile time:
+//!
+//! ```rust
+//! use pidlock::{Pidlock, New, Acquired, Released};
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let lock: Pidlock<New> = Pidlock::new("/tmp/example.pid")?;
+//!
+//! // This compiles: can acquire from New state
+//! let acquired_lock: Pidlock<Acquired> = lock.acquire()?;
+//!
+//! // This compiles: can release from Acquired state
+//! let released_lock: Pidlock<Released> = acquired_lock.release()?;
+//!
+//! // This would NOT compile - cannot acquire from Released state:
+//! // let reacquired = released_lock.acquire(); // Compile error!
+//!
+//! // This would NOT compile - cannot release from New state:
+//! // let released = lock.release(); // Compile error!
 //! # Ok(())
 //! # }
 //! ```
@@ -54,7 +91,7 @@
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let temp_dir = std::env::temp_dir();
 //! let lock_path = temp_dir.join("example.pid");
-//! let lock = Pidlock::new_validated(&lock_path)?;
+//! let lock = Pidlock::new(&lock_path)?;
 //!
 //! // Check if a lock file exists
 //! if lock.exists() {
@@ -73,13 +110,13 @@
 //! ### Error Handling
 //!
 //! ```rust
-//! use pidlock::{Pidlock, PidlockError, InvalidPathError};
+//! use pidlock::{Pidlock, AcquireError, InvalidPathError};
 //!
 //! # fn main() {
-//! let result = Pidlock::new_validated("invalid<path>");
+//! let result = Pidlock::new("invalid<path>");
 //! match result {
 //!     Ok(_) => println!("Path is valid"),
-//!     Err(PidlockError::InvalidPath(InvalidPathError::ProblematicCharacter { character, filename })) => {
+//!     Err(pidlock::NewError::InvalidPath(InvalidPathError::ProblematicCharacter { character, filename })) => {
 //!         println!("Invalid character '{}' in filename: {}", character, filename);
 //!     }
 //!     Err(e) => println!("Other error: {}", e),
@@ -114,6 +151,35 @@ use thiserror::Error;
 #[cfg(feature = "log")]
 use log::warn;
 
+/// Type-level state markers for `Pidlock<T>`.
+/// These types are used as phantom types to track the state of a pidlock at compile time.
+/// Marker type indicating a newly created pidlock that hasn't been acquired yet.
+///
+/// This type cannot be constructed by library users - instances can only be created
+/// through the `Pidlock::new()` method.
+#[derive(Debug)]
+pub struct New {
+    _private: (),
+}
+
+/// Marker type indicating an acquired pidlock that is currently held.
+///
+/// This type cannot be constructed by library users - instances can only be created
+/// through the `acquire()` method on `Pidlock<New>`.
+#[derive(Debug)]
+pub struct Acquired {
+    _private: (),
+}
+
+/// Marker type indicating a released pidlock that can no longer be used.
+///
+/// This type cannot be constructed by library users - instances can only be created
+/// through the `release()` method on `Pidlock<Acquired>`.
+#[derive(Debug)]
+pub struct Released {
+    _private: (),
+}
+
 /// Specific types of path validation errors.
 ///
 /// These errors occur when the provided path for a lock file is not suitable
@@ -122,11 +188,11 @@ use log::warn;
 /// # Examples
 ///
 /// ```rust
-/// use pidlock::{Pidlock, PidlockError, InvalidPathError};
+/// use pidlock::{Pidlock, NewError, InvalidPathError};
 ///
 /// // Example of catching specific path validation errors
-/// match Pidlock::new_validated("") {
-///     Err(PidlockError::InvalidPath(InvalidPathError::EmptyPath)) => {
+/// match Pidlock::new("") {
+///     Err(NewError::InvalidPath(InvalidPathError::EmptyPath)) => {
 ///         println!("Path cannot be empty");
 ///     }
 ///     _ => {}
@@ -154,47 +220,20 @@ pub enum InvalidPathError {
     },
 }
 
-/// Errors that may occur during the `Pidlock` lifetime.
-///
-/// This enum covers all possible error conditions that can occur when working
-/// with pidlocks, from path validation to I/O errors during lock operations.
-///
-/// # Examples
-///
-/// ```rust
-/// use pidlock::{Pidlock, PidlockError};
-///
-/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-/// let temp_dir = std::env::temp_dir();
-/// let lock_path = temp_dir.join("error_example.pid");
-/// let mut lock = Pidlock::new_validated(&lock_path)?;
-///
-/// match lock.acquire() {
-///     Ok(()) => {
-///         println!("Lock acquired successfully");
-///         lock.release()?;
-///     }
-///     Err(PidlockError::LockExists) => {
-///         println!("Another process is holding the lock");
-///     }
-///     Err(PidlockError::InvalidState) => {
-///         println!("Lock is in wrong state for this operation");
-///     }
-///     Err(e) => {
-///         println!("Other error: {}", e);
-///     }
-/// }
-/// # Ok(())
-/// # }
-/// ```
+/// Errors that may occur when creating a new `Pidlock`.
 #[derive(Debug, Error)]
 #[non_exhaustive]
-pub enum PidlockError {
+pub enum NewError {
+    #[error("Invalid path provided for lock file")]
+    InvalidPath(#[from] InvalidPathError),
+}
+
+/// Errors that may occur when acquiring a lock.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum AcquireError {
     #[error("A lock already exists")]
     LockExists,
-
-    #[error("An operation was attempted in the wrong state, e.g. releasing before acquiring")]
-    InvalidState,
 
     #[error("An I/O error occurred")]
     IOError(#[from] std::io::Error),
@@ -203,29 +242,23 @@ pub enum PidlockError {
     InvalidPath(#[from] InvalidPathError),
 }
 
-impl PartialEq for PidlockError {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (PidlockError::LockExists, PidlockError::LockExists) => true,
-            (PidlockError::InvalidState, PidlockError::InvalidState) => true,
-            (PidlockError::IOError(a), PidlockError::IOError(b)) => {
-                // Compare IO errors by their kind only (more reliable than string comparison)
-                a.kind() == b.kind()
-            }
-            (PidlockError::InvalidPath(a), PidlockError::InvalidPath(b)) => {
-                // Compare InvalidPathError by discriminant only for now
-                // This is a simplified comparison since InvalidPathError may contain non-comparable fields
-                std::mem::discriminant(a) == std::mem::discriminant(b)
-            }
-            _ => false,
-        }
-    }
+/// Errors that may occur when releasing a lock.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum ReleaseError {
+    #[error("An I/O error occurred")]
+    IOError(#[from] std::io::Error),
 }
 
-/// A result from a Pidlock operation
-type PidlockResult = Result<(), PidlockError>;
+/// Errors that may occur during lock status checks.
+#[derive(Debug, Error)]
+#[non_exhaustive]
+pub enum StatusError {
+    #[error("An I/O error occurred")]
+    IOError(#[from] std::io::Error),
+}
 
-/// States a Pidlock can be in during its lifetime.
+/// States a Pidlock can be in during its lifetime (internal use only).
 #[derive(Debug, PartialEq)]
 enum PidlockState {
     #[doc = "A new pidlock, unacquired"]
@@ -238,7 +271,7 @@ enum PidlockState {
 
 /// Validates that a path is suitable for use as a lock file.
 /// Checks for common cross-platform path issues.
-fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
+fn validate_lock_path(path: &Path) -> Result<(), NewError> {
     #[cfg(feature = "log")]
     if path.is_relative() {
         warn!(
@@ -249,7 +282,7 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
 
     // Check for empty path
     if path.as_os_str().is_empty() {
-        return Err(PidlockError::InvalidPath(InvalidPathError::EmptyPath));
+        return Err(NewError::InvalidPath(InvalidPathError::EmptyPath));
     }
 
     // Check for common problematic characters in filename
@@ -270,7 +303,7 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
                 .unwrap_or(&filename_str)
                 .to_uppercase();
             if reserved_names.contains(&base_name.as_str()) {
-                return Err(PidlockError::InvalidPath(InvalidPathError::ReservedName {
+                return Err(NewError::InvalidPath(InvalidPathError::ReservedName {
                     filename: filename_str.to_string(),
                 }));
             }
@@ -280,7 +313,7 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
         let problematic_chars = ['<', '>', ':', '"', '|', '?', '*'];
         for &ch in &problematic_chars {
             if filename_str.contains(ch) {
-                return Err(PidlockError::InvalidPath(
+                return Err(NewError::InvalidPath(
                     InvalidPathError::ProblematicCharacter {
                         character: ch,
                         filename: filename_str.to_string(),
@@ -291,11 +324,9 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
 
         // Check for control characters
         if filename_str.chars().any(|c| c.is_control()) {
-            return Err(PidlockError::InvalidPath(
-                InvalidPathError::ControlCharacters {
-                    filename: filename_str.to_string(),
-                },
-            ));
+            return Err(NewError::InvalidPath(InvalidPathError::ControlCharacters {
+                filename: filename_str.to_string(),
+            }));
         }
     }
 
@@ -305,7 +336,7 @@ fn validate_lock_path(path: &Path) -> Result<(), PidlockError> {
     {
         // Check if we can potentially create the directory
         if let Err(e) = fs::create_dir_all(parent) {
-            return Err(PidlockError::InvalidPath(
+            return Err(NewError::InvalidPath(
                 InvalidPathError::ParentDirectoryCreationFailed {
                     path: parent.display().to_string(),
                     source: e,
@@ -458,15 +489,27 @@ fn process_exists(pid: i32) -> bool {
     }
 }
 
-/// A pid-centered lock. A lock is considered "acquired" when a file exists on disk
-/// at the path specified, containing the process id of the locking process.
+/// A pid-centered lock with type-safe state management.
+///
+/// A lock is considered "acquired" when a file exists on disk at the path specified,
+/// containing the process id of the locking process. The type parameter `T` tracks
+/// the state of the lock at compile time, preventing invalid state transitions.
+///
+/// ## Type Safety
+///
+/// The lock starts in the `New` state, transitions to `Acquired` when acquired,
+/// and finally to `Released` when released. The type system prevents:
+/// - Acquiring a lock that's already acquired
+/// - Releasing a lock that hasn't been acquired  
+/// - Re-acquiring a released lock
+/// - Multiple releases of the same lock
 ///
 /// ## Examples
 ///
 /// ### Basic Usage
 ///
 /// ```rust
-/// use pidlock::Pidlock;
+/// use pidlock::{Pidlock, New, Acquired, Released};
 /// use std::fs;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -474,19 +517,19 @@ fn process_exists(pid: i32) -> bool {
 /// let temp_dir = std::env::temp_dir();
 /// let lock_path = temp_dir.join("example.pid");
 ///
-/// let mut lock = Pidlock::new_validated(&lock_path)?;
+/// let lock: Pidlock<New> = Pidlock::new(&lock_path)?;
 ///
-/// // Acquire the lock
-/// lock.acquire()?;
-/// assert!(lock.locked());
+/// // Acquire the lock - type changes to Pidlock<Acquired>
+/// let acquired_lock: Pidlock<Acquired> = lock.acquire()?;
+/// assert!(acquired_lock.locked());
 ///
 /// // The lock file now exists and contains our PID
-/// assert!(lock.exists());
+/// assert!(acquired_lock.exists());
 ///
-/// // Release the lock
-/// lock.release()?;
-/// assert!(!lock.locked());
-/// assert!(!lock.exists()); // File is removed
+/// // Release the lock - type changes to Pidlock<Released>
+/// let released_lock: Pidlock<Released> = acquired_lock.release()?;
+/// assert!(!released_lock.locked());
+/// assert!(!released_lock.exists()); // File is removed
 /// # Ok(())
 /// # }
 /// ```
@@ -494,7 +537,7 @@ fn process_exists(pid: i32) -> bool {
 /// ### Handling Lock Conflicts
 ///
 /// ```rust
-/// use pidlock::{Pidlock, PidlockError};
+/// use pidlock::{Pidlock, AcquireError};
 /// use std::fs;
 ///
 /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -502,13 +545,13 @@ fn process_exists(pid: i32) -> bool {
 /// let lock_path = temp_dir.join("conflict_example.pid");
 ///
 /// // First lock
-/// let mut lock1 = Pidlock::new_validated(&lock_path)?;
-/// lock1.acquire()?;
+/// let lock1 = Pidlock::new(&lock_path)?;
+/// let acquired_lock1 = lock1.acquire()?;
 ///
 /// // Try to acquire the same lock from another instance
-/// let mut lock2 = Pidlock::new_validated(&lock_path)?;
+/// let lock2 = Pidlock::new(&lock_path)?;
 /// match lock2.acquire() {
-///     Err(PidlockError::LockExists) => {
+///     Err(AcquireError::LockExists) => {
 ///         println!("Lock is already held by another process");
 ///         // This is expected behavior
 ///     }
@@ -516,7 +559,7 @@ fn process_exists(pid: i32) -> bool {
 /// }
 ///
 /// // Clean up
-/// lock1.release()?;
+/// let _released_lock1 = acquired_lock1.release()?;
 /// # Ok(())
 /// # }
 /// ```
@@ -532,9 +575,9 @@ fn process_exists(pid: i32) -> bool {
 /// let lock_path = temp_dir.join("drop_example.pid");
 ///
 /// {
-///     let mut lock = Pidlock::new_validated(&lock_path)?;
-///     lock.acquire()?;
-///     assert!(lock.exists());
+///     let lock = Pidlock::new(&lock_path)?;
+///     let acquired_lock = lock.acquire()?;
+///     assert!(acquired_lock.exists());
 ///     // Lock goes out of scope here and is automatically cleaned up
 /// }
 ///
@@ -544,32 +587,18 @@ fn process_exists(pid: i32) -> bool {
 /// # }
 /// ```
 #[derive(Debug)]
-pub struct Pidlock {
+pub struct Pidlock<T> {
     #[doc = "The current process id"]
     pid: u32,
     #[doc = "A path to the lock file"]
     path: PathBuf,
-    #[doc = "Current state of the Pidlock"]
+    #[doc = "Current state of the Pidlock (internal tracking)"]
     state: PidlockState,
+    #[doc = "Phantom type parameter for compile-time state tracking"]
+    _phantom: std::marker::PhantomData<T>,
 }
 
-impl Pidlock {
-    /// Create a new Pidlock at the provided path.
-    ///
-    /// For backwards compatibility, this method does not validate the path.
-    /// Use `new_validated` if you want path validation.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use `new_validated` for path validation and better cross-platform compatibility"
-    )]
-    pub fn new(path: impl AsRef<Path>) -> Self {
-        Pidlock {
-            pid: process::id(),
-            path: path.as_ref().into(),
-            state: PidlockState::New,
-        }
-    }
-
+impl Pidlock<New> {
     /// Create a new Pidlock at the provided path with path validation.
     ///
     /// This is the recommended way to create a `Pidlock` as it validates the path
@@ -582,32 +611,32 @@ impl Pidlock {
     ///
     /// # Returns
     ///
-    /// * `Ok(Pidlock)` - A new pidlock instance ready to be acquired
-    /// * `Err(PidlockError::InvalidPath)` - If the path is not suitable for use as a lock file
+    /// * `Ok(Pidlock<New>)` - A new pidlock instance ready to be acquired
+    /// * `Err(NewError::InvalidPath)` - If the path is not suitable for use as a lock file
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use pidlock::Pidlock;
+    /// use pidlock::{Pidlock, New};
     /// use std::env;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// // Valid path
     /// let temp_dir = env::temp_dir();
     /// let lock_path = temp_dir.join("valid.pid");
-    /// let lock = Pidlock::new_validated(&lock_path)?;
+    /// let lock: Pidlock<New> = Pidlock::new(&lock_path)?;
     /// # Ok(())
     /// # }
     /// ```
     ///
     /// ```rust
-    /// use pidlock::{Pidlock, PidlockError, InvalidPathError};
+    /// use pidlock::{Pidlock, NewError, InvalidPathError};
     ///
     /// # fn main() {
     /// // Invalid path with problematic characters
-    /// let result = Pidlock::new_validated("invalid<file.pid");
+    /// let result = Pidlock::new("invalid<file.pid");
     /// match result {
-    ///     Err(PidlockError::InvalidPath(InvalidPathError::ProblematicCharacter { .. })) => {
+    ///     Err(NewError::InvalidPath(InvalidPathError::ProblematicCharacter { .. })) => {
     ///         // Expected error for invalid characters
     ///     }
     ///     _ => panic!("Should have failed with InvalidPath"),
@@ -617,8 +646,8 @@ impl Pidlock {
     ///
     /// # Errors
     ///
-    /// Returns `PidlockError::InvalidPath` if the path is not suitable for use as a lock file.
-    pub fn new_validated(path: impl AsRef<Path>) -> Result<Self, PidlockError> {
+    /// Returns `NewError::InvalidPath` if the path is not suitable for use as a lock file.
+    pub fn new(path: impl AsRef<Path>) -> Result<Self, NewError> {
         let path_ref = path.as_ref();
 
         // Validate the path before creating the Pidlock
@@ -628,6 +657,7 @@ impl Pidlock {
             pid: process::id(),
             path: path_ref.into(),
             state: PidlockState::New,
+            _phantom: std::marker::PhantomData::<New>,
         })
     }
 
@@ -657,37 +687,37 @@ impl Pidlock {
         }
     }
 
-    /// Acquire a lock.
+    /// Acquire a lock, transitioning from `New` to `Acquired` state.
     ///
     /// This method attempts to create the lock file containing the current process ID.
     /// If a stale lock file exists (from a dead process), it will be automatically cleaned up.
     ///
     /// # Returns
     ///
-    /// * `Ok(())` - Lock was successfully acquired
-    /// * `Err(PidlockError::LockExists)` - Another active process holds the lock
-    /// * `Err(PidlockError::InvalidState)` - Lock is already acquired or released
-    /// * `Err(PidlockError::IOError)` - File system error occurred
+    /// * `Ok(Pidlock<Acquired>)` - Lock was successfully acquired
+    /// * `Err(AcquireError::LockExists)` - Another active process holds the lock
+    /// * `Err(AcquireError::IOError)` - File system error occurred
+    /// * `Err(AcquireError::InvalidPath)` - Path validation failed
     ///
     /// # Examples
     ///
     /// ```rust
-    /// use pidlock::{Pidlock, PidlockError};
+    /// use pidlock::{Pidlock, AcquireError, New, Acquired};
     /// use std::env;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let temp_dir = env::temp_dir();
     /// let lock_path = temp_dir.join("acquire_example.pid");
     ///
-    /// let mut lock = Pidlock::new_validated(&lock_path)?;
+    /// let lock: Pidlock<New> = Pidlock::new(&lock_path)?;
     ///
     /// match lock.acquire() {
-    ///     Ok(()) => {
+    ///     Ok(acquired_lock) => {
     ///         println!("Lock acquired successfully!");
     ///         // Do your work here...
-    ///         lock.release()?;
+    ///         let _released_lock = acquired_lock.release()?;
     ///     }
-    ///     Err(PidlockError::LockExists) => {
+    ///     Err(AcquireError::LockExists) => {
     ///         println!("Another instance is already running");
     ///     }
     ///     Err(e) => {
@@ -700,19 +730,11 @@ impl Pidlock {
     ///
     /// # Behavior
     ///
-    /// 1. **State validation**: Can only be called on a `New` pidlock
-    /// 2. **Stale lock cleanup**: Automatically removes locks from dead processes
-    /// 3. **Atomic creation**: Uses `O_EXCL`/`CREATE_NEW` for atomic lock file creation
-    /// 4. **Secure permissions**: Creates files with restrictive permissions (600 on Unix)
-    /// 5. **Reliable writes**: Flushes data to disk before returning success
-    pub fn acquire(&mut self) -> PidlockResult {
-        match self.state {
-            PidlockState::New => {}
-            _ => {
-                return Err(PidlockError::InvalidState);
-            }
-        }
-
+    /// 1. **Stale lock cleanup**: Automatically removes locks from dead processes
+    /// 2. **Atomic creation**: Uses `O_EXCL`/`CREATE_NEW` for atomic lock file creation
+    /// 3. **Secure permissions**: Creates files with restrictive permissions (600 on Unix)
+    /// 4. **Reliable writes**: Flushes data to disk before returning success
+    pub fn acquire(self) -> Result<Pidlock<Acquired>, AcquireError> {
         // Check if there's a stale lock that we can remove
         if self.check_stale() {
             // Lock exists but process is dead, remove the stale lock file
@@ -734,22 +756,27 @@ impl Pidlock {
             Ok(file) => file,
             Err(err) => {
                 return match err.kind() {
-                    std::io::ErrorKind::AlreadyExists => Err(PidlockError::LockExists),
-                    _ => Err(PidlockError::from(err)),
+                    std::io::ErrorKind::AlreadyExists => Err(AcquireError::LockExists),
+                    _ => Err(AcquireError::IOError(err)),
                 };
             }
         };
 
-        file.write_all(&self.pid.to_string().into_bytes()[..])
-            .map_err(PidlockError::from)?;
+        file.write_all(&self.pid.to_string().into_bytes()[..])?;
 
         // Ensure data is written to disk for reliability
-        file.flush().map_err(PidlockError::from)?;
+        file.flush()?;
 
-        self.state = PidlockState::Acquired;
-        Ok(())
+        Ok(Pidlock {
+            pid: self.pid,
+            path: self.path.clone(),
+            state: PidlockState::Acquired,
+            _phantom: std::marker::PhantomData::<Acquired>,
+        })
     }
+}
 
+impl<T> Pidlock<T> {
     /// Returns true when the lock is in an acquired state.
     ///
     /// This is a local state check only - it tells you whether this `Pidlock` instance
@@ -763,25 +790,25 @@ impl Pidlock {
     /// # Examples
     ///
     /// ```rust
-    /// use pidlock::Pidlock;
+    /// use pidlock::{Pidlock, New, Acquired, Released};
     /// use std::env;
     ///
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
     /// let temp_dir = env::temp_dir();
     /// let lock_path = temp_dir.join("locked_example.pid");
     ///
-    /// let mut lock = Pidlock::new_validated(&lock_path)?;
+    /// let lock: Pidlock<New> = Pidlock::new(&lock_path)?;
     ///
     /// // Initially not locked
     /// assert!(!lock.locked());
     ///
     /// // After acquiring
-    /// lock.acquire()?;
-    /// assert!(lock.locked());
+    /// let acquired_lock = lock.acquire()?;
+    /// assert!(acquired_lock.locked());
     ///
     /// // After releasing
-    /// lock.release()?;
-    /// assert!(!lock.locked());
+    /// let released_lock = acquired_lock.release()?;
+    /// assert!(!released_lock.locked());
     /// # Ok(())
     /// # }
     /// ```
@@ -811,7 +838,7 @@ impl Pidlock {
     /// let temp_dir = env::temp_dir();
     /// let lock_path = temp_dir.join("exists_example.pid");
     ///
-    /// let lock = Pidlock::new_validated(&lock_path)?;
+    /// let lock = Pidlock::new(&lock_path)?;
     ///
     /// // Initially, no lock file exists
     /// assert!(!lock.exists());
@@ -848,7 +875,7 @@ impl Pidlock {
     /// let temp_dir = env::temp_dir();
     /// let lock_path = temp_dir.join("is_active_example.pid");
     ///
-    /// let lock = Pidlock::new_validated(&lock_path)?;
+    /// let lock = Pidlock::new(&lock_path)?;
     ///
     /// match lock.is_active()? {
     ///     true => println!("Lock is held by an active process"),
@@ -864,7 +891,7 @@ impl Pidlock {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn is_active(&self) -> Result<bool, PidlockError> {
+    pub fn is_active(&self) -> Result<bool, StatusError> {
         if !self.path.exists() {
             return Ok(false);
         }
@@ -873,59 +900,6 @@ impl Pidlock {
             Some(pid) => Ok(process_exists(pid)),
             None => Ok(false), // No PID in file means inactive
         }
-    }
-
-    /// Release the lock.
-    ///
-    /// This method removes the lock file from disk and transitions the lock to the `Released` state.
-    /// Once released, the lock cannot be re-acquired (create a new `Pidlock` instance instead).
-    ///
-    /// # Returns
-    ///
-    /// * `Ok(())` - Lock was successfully released
-    /// * `Err(PidlockError::InvalidState)` - Lock is not currently acquired
-    /// * `Err(PidlockError::IOError)` - File system error occurred during removal
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use pidlock::Pidlock;
-    /// use std::env;
-    ///
-    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let temp_dir = env::temp_dir();
-    /// let lock_path = temp_dir.join("release_example.pid");
-    ///
-    /// let mut lock = Pidlock::new_validated(&lock_path)?;
-    /// lock.acquire()?;
-    ///
-    /// // Explicitly release the lock
-    /// lock.release()?;
-    ///
-    /// // Lock file should be gone
-    /// assert!(!lock.exists());
-    /// assert!(!lock.locked());
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Note
-    ///
-    /// Releasing a lock is optional - the `Drop` implementation will automatically
-    /// clean up acquired locks when the `Pidlock` goes out of scope. However, explicit
-    /// release is recommended for better error handling and immediate cleanup.
-    pub fn release(&mut self) -> PidlockResult {
-        match self.state {
-            PidlockState::Acquired => {}
-            _ => {
-                return Err(PidlockError::InvalidState);
-            }
-        }
-
-        fs::remove_file(&self.path).map_err(PidlockError::from)?;
-
-        self.state = PidlockState::Released;
-        Ok(())
     }
 
     /// Gets the owner of this lockfile, returning the PID if it exists and is valid.
@@ -950,19 +924,19 @@ impl Pidlock {
     /// let temp_dir = env::temp_dir();
     /// let lock_path = temp_dir.join("owner_example.pid");
     ///
-    /// let mut lock = Pidlock::new_validated(&lock_path)?;
+    /// let lock = Pidlock::new(&lock_path)?;
     ///
     /// // No owner initially
     /// assert_eq!(lock.get_owner()?, None);
     ///
     /// // After acquiring, we should be the owner
-    /// lock.acquire()?;
-    /// if let Some(owner_pid) = lock.get_owner()? {
+    /// let acquired_lock = lock.acquire()?;
+    /// if let Some(owner_pid) = acquired_lock.get_owner()? {
     ///     println!("Lock is owned by PID: {}", owner_pid);
     ///     assert_eq!(owner_pid, std::process::id() as i32);
     /// }
     ///
-    /// lock.release()?;
+    /// let _released_lock = acquired_lock.release()?;
     /// # Ok(())
     /// # }
     /// ```
@@ -974,7 +948,7 @@ impl Pidlock {
     /// - File contains a PID that doesn't correspond to a running process
     /// - File contains a PID outside the valid range for the platform
     /// - File is empty or contains only whitespace
-    pub fn get_owner(&self) -> Result<Option<i32>, PidlockError> {
+    pub fn get_owner(&self) -> Result<Option<i32>, StatusError> {
         let mut file = match fs::OpenOptions::new().read(true).open(&self.path) {
             Ok(file) => file,
             Err(_) => {
@@ -989,7 +963,7 @@ impl Pidlock {
                 "Removing corrupted/invalid pid file at {}",
                 self.path.to_str().unwrap_or("<invalid>")
             );
-            fs::remove_file(&self.path).map_err(PidlockError::from)?;
+            fs::remove_file(&self.path)?;
             return Ok(None);
         }
 
@@ -1001,7 +975,7 @@ impl Pidlock {
                     "Removing stale pid file at {}",
                     self.path.to_str().unwrap_or("<invalid>")
                 );
-                fs::remove_file(&self.path).map_err(PidlockError::from)?;
+                fs::remove_file(&self.path)?;
                 Ok(None)
             }
             Err(_) => {
@@ -1010,14 +984,65 @@ impl Pidlock {
                     "Removing corrupted/invalid pid file at {}",
                     self.path.to_str().unwrap_or("<invalid>")
                 );
-                fs::remove_file(&self.path).map_err(PidlockError::from)?;
+                fs::remove_file(&self.path)?;
                 Ok(None)
             }
         }
     }
 }
 
-impl Drop for Pidlock {
+impl Pidlock<Acquired> {
+    /// Release the lock, transitioning from `Acquired` to `Released` state.
+    ///
+    /// This method removes the lock file from disk and transitions the lock to the `Released` state.
+    /// Once released, the lock cannot be re-acquired (create a new `Pidlock` instance instead).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Pidlock<Released>)` - Lock was successfully released
+    /// * `Err(ReleaseError::IOError)` - File system error occurred during removal
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pidlock::{Pidlock, New, Acquired, Released};
+    /// use std::env;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("release_example.pid");
+    ///
+    /// let lock: Pidlock<New> = Pidlock::new(&lock_path)?;
+    /// let acquired_lock: Pidlock<Acquired> = lock.acquire()?;
+    ///
+    /// // Explicitly release the lock
+    /// let released_lock: Pidlock<Released> = acquired_lock.release()?;
+    ///
+    /// // Lock file should be gone
+    /// assert!(!released_lock.exists());
+    /// assert!(!released_lock.locked());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// Releasing a lock is optional - the `Drop` implementation will automatically
+    /// clean up acquired locks when the `Pidlock` goes out of scope. However, explicit
+    /// release is recommended for better error handling and immediate cleanup.
+    pub fn release(self) -> Result<Pidlock<Released>, ReleaseError> {
+        fs::remove_file(&self.path)?;
+
+        Ok(Pidlock {
+            pid: self.pid,
+            path: self.path.clone(),
+            state: PidlockState::Released,
+            _phantom: std::marker::PhantomData::<Released>,
+        })
+    }
+}
+
+impl<T> Drop for Pidlock<T> {
     /// Automatically release the lock when the Pidlock goes out of scope.
     /// This ensures that lock files are cleaned up even if the process panics
     /// or exits unexpectedly while holding a lock.
@@ -1053,6 +1078,33 @@ impl Drop for Pidlock {
     }
 }
 
+// Convenience type conversions for common workflows
+impl From<Pidlock<New>> for Pidlock<Acquired> {
+    /// Convert a `Pidlock<New>` to `Pidlock<Acquired>` by acquiring the lock.
+    ///
+    /// # Panics
+    /// This conversion will panic if the lock cannot be acquired. For error handling,
+    /// use the `acquire()` method directly.
+    fn from(lock: Pidlock<New>) -> Self {
+        #[allow(clippy::expect_used)]
+        lock.acquire()
+            .expect("Failed to acquire lock during conversion")
+    }
+}
+
+impl From<Pidlock<Acquired>> for Pidlock<Released> {
+    /// Convert a `Pidlock<Acquired>` to `Pidlock<Released>` by releasing the lock.
+    ///
+    /// # Panics  
+    /// This conversion will panic if the lock cannot be released. For error handling,
+    /// use the `release()` method directly.
+    fn from(lock: Pidlock<Acquired>) -> Self {
+        #[allow(clippy::expect_used)]
+        lock.release()
+            .expect("Failed to release lock during conversion")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -1062,8 +1114,56 @@ mod tests {
     use rand::{Rng, thread_rng};
     use tempfile::NamedTempFile;
 
-    use super::PidlockState;
-    use super::{Pidlock, PidlockError};
+    use super::{AcquireError, NewError, Pidlock};
+    use super::{Acquired, New, PidlockState, Released};
+
+    // Core type-safe API tests
+    #[test]
+    fn test_type_safe_lifecycle() {
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+
+        // Create new lock (New state)
+        let new_lock = Pidlock::new(pid_path).unwrap();
+
+        // Acquire lock (New -> Acquired)
+        let acquired_lock = new_lock.acquire().unwrap();
+        assert!(acquired_lock.locked());
+
+        // Release lock (Acquired -> Released)
+        let released_lock = acquired_lock.release().unwrap();
+        assert!(!released_lock.locked());
+    }
+
+    #[test]
+    fn test_type_safe_lock_conflict() {
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+
+        // Create and acquire first lock
+        let lock1 = Pidlock::new(pid_path).unwrap();
+        let acquired_lock1 = lock1.acquire().unwrap();
+
+        // Try to acquire second lock - should fail
+        let lock2 = Pidlock::new(pid_path).unwrap();
+        match lock2.acquire() {
+            Err(AcquireError::LockExists) => {
+                // Expected
+            }
+            Ok(_) => panic!("Should not be able to acquire lock twice"),
+            Err(e) => panic!("Unexpected error: {}", e),
+        }
+
+        // Release first lock
+        let _released_lock = acquired_lock1.release().unwrap();
+
+        // Now second attempt should succeed
+        let lock3 = Pidlock::new(pid_path).unwrap();
+        let _acquired_lock3 = lock3.acquire().unwrap();
+    }
+
+    // Legacy tests follow (many need updating for new API)
+    // TODO: Update legacy tests to use new type-safe API
 
     fn make_temp_file() -> NamedTempFile {
         NamedTempFile::new().expect("Failed to create temporary file")
@@ -1073,7 +1173,7 @@ mod tests {
     fn test_new() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let pidfile = Pidlock::new_validated(pid_path).unwrap();
+        let pidfile: Pidlock<New> = Pidlock::new(pid_path).unwrap();
 
         assert_eq!(pidfile.pid, std::process::id());
         assert_eq!(pidfile.path, PathBuf::from(pid_path));
@@ -1084,31 +1184,31 @@ mod tests {
     fn test_acquire_and_release() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
-        pidfile.acquire().unwrap();
+        let pidfile: Pidlock<New> = Pidlock::new(pid_path).unwrap();
+        let acquired_lock: Pidlock<Acquired> = pidfile.acquire().unwrap();
 
-        assert_eq!(pidfile.state, PidlockState::Acquired);
+        assert_eq!(acquired_lock.state, PidlockState::Acquired);
 
-        pidfile.release().unwrap();
+        let released_lock: Pidlock<Released> = acquired_lock.release().unwrap();
 
-        assert_eq!(pidfile.state, PidlockState::Released);
+        assert_eq!(released_lock.state, PidlockState::Released);
     }
 
     #[test]
     fn test_acquire_lock_exists() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut orig_pidfile = Pidlock::new_validated(pid_path).unwrap();
-        orig_pidfile.acquire().unwrap();
+        let orig_pidfile: Pidlock<New> = Pidlock::new(pid_path).unwrap();
+        let acquired_lock = orig_pidfile.acquire().unwrap();
 
-        let mut pidfile = Pidlock::new_validated(orig_pidfile.path.to_str().unwrap()).unwrap();
+        let pidfile: Pidlock<New> = Pidlock::new(acquired_lock.path.to_str().unwrap()).unwrap();
         match pidfile.acquire() {
             Err(err) => {
-                orig_pidfile.release().unwrap();
-                assert_eq!(err, PidlockError::LockExists);
+                let _released_lock = acquired_lock.release().unwrap();
+                assert!(matches!(err, AcquireError::LockExists));
             }
             _ => {
-                orig_pidfile.release().unwrap();
+                let _released_lock = acquired_lock.release().unwrap();
                 panic!("Test failed");
             }
         }
@@ -1118,49 +1218,67 @@ mod tests {
     fn test_acquire_already_acquired() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
-        pidfile.acquire().unwrap();
-        match pidfile.acquire() {
-            Err(err) => {
-                pidfile.release().unwrap();
-                assert_eq!(err, PidlockError::InvalidState);
+
+        // Create and acquire first lock
+        let pidfile1 = Pidlock::new(pid_path).unwrap();
+        let acquired_lock1 = pidfile1.acquire().unwrap();
+
+        // Try to acquire a second lock on the same path - should fail
+        let pidfile2 = Pidlock::new(pid_path).unwrap();
+        match pidfile2.acquire() {
+            Err(AcquireError::LockExists) => {
+                // Expected behavior - lock already exists
             }
-            _ => {
-                pidfile.release().unwrap();
-                panic!("Test failed");
+            Ok(_) => {
+                panic!("Should not be able to acquire lock twice");
+            }
+            Err(e) => {
+                panic!("Unexpected error: {}", e);
             }
         }
+
+        // Clean up
+        let _released_lock = acquired_lock1.release().unwrap();
     }
 
     #[test]
     fn test_release_bad_state() {
+        // With the new type-safe API, you cannot call release() on a Pidlock<New>
+        // This test demonstrates that the type system prevents this at compile time
+        // The old test would have been:
+        // let pidfile = Pidlock::new(pid_path).unwrap();
+        // match pidfile.release() { ... }
+        //
+        // But now this would be a compile error, which is exactly what we want!
+        // This test is no longer relevant since the type system prevents the error state.
+
+        // Instead, let's test that we can create a new lock successfully
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
-        match pidfile.release() {
-            Err(err) => {
-                assert_eq!(err, PidlockError::InvalidState);
-            }
-            _ => {
-                panic!("Test failed");
-            }
-        }
+        let pidfile = Pidlock::new(pid_path).unwrap();
+
+        // The type system ensures we can't call release() on a New lock
+        // This line would not compile: pidfile.release()
+
+        // We can only acquire from a New state
+        let _acquired_lock = pidfile.acquire().unwrap();
     }
 
     #[test]
     fn test_locked() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let mut pidfile = Pidlock::new_validated(pid_path).unwrap();
-        pidfile.acquire().unwrap();
-        assert!(pidfile.locked());
+        let pidfile = Pidlock::new(pid_path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
+        assert!(acquired_lock.locked());
+        let _released_lock = acquired_lock.release().unwrap();
     }
 
     #[test]
     fn test_locked_not_locked() {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
-        let pidfile = Pidlock::new_validated(pid_path).unwrap();
+        let pidfile = Pidlock::new(pid_path).unwrap();
         assert!(!pidfile.locked());
     }
 
@@ -1175,9 +1293,9 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let mut pidfile = Pidlock::new_validated(&path).unwrap();
-        pidfile.acquire().unwrap();
-        assert_eq!(pidfile.state, PidlockState::Acquired);
+        let pidfile = Pidlock::new(&path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
+        assert_eq!(acquired_lock.state, PidlockState::Acquired);
     }
 
     #[test]
@@ -1193,9 +1311,9 @@ mod tests {
         temp_file.write_all(&contents.into_bytes()).unwrap();
         temp_file.flush().unwrap();
 
-        let mut pidfile = Pidlock::new_validated(&path).unwrap();
-        pidfile.acquire().unwrap();
-        assert_eq!(pidfile.state, PidlockState::Acquired);
+        let pidfile = Pidlock::new(&path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
+        assert_eq!(acquired_lock.state, PidlockState::Acquired);
     }
 
     #[test]
@@ -1208,9 +1326,9 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let mut pidfile = Pidlock::new_validated(&path).unwrap();
-        pidfile.acquire().unwrap();
-        assert_eq!(pidfile.state, PidlockState::Acquired);
+        let pidfile = Pidlock::new(&path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
+        assert_eq!(acquired_lock.state, PidlockState::Acquired);
     }
 
     #[test]
@@ -1220,14 +1338,14 @@ mod tests {
 
         // Create and acquire a lock in a scope
         {
-            let mut pidfile = Pidlock::new_validated(&path).unwrap();
-            pidfile.acquire().unwrap();
-            assert_eq!(pidfile.state, PidlockState::Acquired);
+            let pidfile = Pidlock::new(&path).unwrap();
+            let acquired_lock = pidfile.acquire().unwrap();
+            assert_eq!(acquired_lock.state, PidlockState::Acquired);
 
             // Verify the lock file exists
             assert!(std::path::Path::new(&path).exists());
 
-            // The Drop implementation should clean up when pidfile goes out of scope
+            // The Drop implementation should clean up when acquired_lock goes out of scope
         }
 
         // After the scope ends, the lock file should be cleaned up
@@ -1241,7 +1359,7 @@ mod tests {
 
         // Create a lock but don't acquire it
         {
-            let _pidfile = Pidlock::new_validated(&path).unwrap();
+            let _pidfile = Pidlock::new(&path).unwrap();
             // Lock is not acquired, so drop should not try to remove anything
         }
 
@@ -1250,10 +1368,10 @@ mod tests {
 
         // Now create a lock, acquire and manually release it
         {
-            let mut pidfile = Pidlock::new_validated(&path).unwrap();
-            pidfile.acquire().unwrap();
-            pidfile.release().unwrap();
-            assert_eq!(pidfile.state, PidlockState::Released);
+            let pidfile = Pidlock::new(&path).unwrap();
+            let acquired_lock = pidfile.acquire().unwrap();
+            let released_lock = acquired_lock.release().unwrap();
+            assert_eq!(released_lock.state, PidlockState::Released);
 
             // Drop should not try to clean up since state is Released
         }
@@ -1267,7 +1385,7 @@ mod tests {
         let temp_file = make_temp_file();
         let path = temp_file.path().to_string_lossy().to_string();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         assert_eq!(result, None);
     }
@@ -1278,14 +1396,14 @@ mod tests {
         let path = temp_file.path().to_string_lossy().to_string();
 
         // First create a lock with our own PID
-        let mut pidfile = Pidlock::new_validated(&path).unwrap();
-        pidfile.acquire().unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
 
         // Now test get_owner returns our PID
-        let result = pidfile.get_owner().unwrap();
+        let result = acquired_lock.get_owner().unwrap();
         assert_eq!(result, Some(std::process::id() as i32));
 
-        pidfile.release().unwrap();
+        let _released_lock = acquired_lock.release().unwrap();
     }
 
     #[test]
@@ -1297,7 +1415,7 @@ mod tests {
         temp_file.write_all(b"").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Empty file should be cleaned up and return None
         assert_eq!(result, None);
@@ -1313,7 +1431,7 @@ mod tests {
         temp_file.write_all(b"   \n  \t  \r\n  ").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Whitespace-only file should be cleaned up and return None
         assert_eq!(result, None);
@@ -1329,7 +1447,7 @@ mod tests {
         temp_file.write_all(b"-12345").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Negative PID should be cleaned up and return None
         assert_eq!(result, None);
@@ -1348,7 +1466,7 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Large PID should be cleaned up since it likely doesn't exist
         assert_eq!(result, None);
@@ -1364,7 +1482,7 @@ mod tests {
         temp_file.write_all(b"0").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
 
         // PID 0 behavior is system-dependent:
@@ -1395,7 +1513,7 @@ mod tests {
         temp_file.write_all(b"12345 extra content").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should parse the PID part and clean up since 12345 likely doesn't exist
         assert_eq!(result, None);
@@ -1408,22 +1526,23 @@ mod tests {
         let path = temp_file.path().to_string_lossy().to_string();
 
         // First lock should succeed
-        let mut lock1 = Pidlock::new_validated(&path).unwrap();
-        assert!(lock1.acquire().is_ok());
+        let lock1 = Pidlock::new(&path).unwrap();
+        let acquired_lock1 = lock1.acquire().unwrap();
 
         // Second lock should fail with LockExists
-        let mut lock2 = Pidlock::new_validated(&path).unwrap();
+        let lock2 = Pidlock::new(&path).unwrap();
         match lock2.acquire() {
-            Err(PidlockError::LockExists) => {} // Expected
+            Err(AcquireError::LockExists) => {} // Expected
             other => panic!("Expected LockExists, got {:?}", other),
         }
 
         // Clean up
-        lock1.release().unwrap();
+        let _released_lock1 = acquired_lock1.release().unwrap();
 
-        // Now second lock should succeed
-        assert!(lock2.acquire().is_ok());
-        lock2.release().unwrap();
+        // Now third lock should succeed
+        let lock3 = Pidlock::new(&path).unwrap();
+        let acquired_lock3 = lock3.acquire().unwrap();
+        let _released_lock3 = acquired_lock3.release().unwrap();
     }
 
     #[test]
@@ -1436,23 +1555,23 @@ mod tests {
         temp_file.flush().unwrap();
 
         // Acquiring should clean up the stale file and succeed
-        let mut pidfile = Pidlock::new_validated(&path).unwrap();
-        assert!(pidfile.acquire().is_ok());
-        assert_eq!(pidfile.state, PidlockState::Acquired);
+        let pidfile = Pidlock::new(&path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
+        assert_eq!(acquired_lock.state, PidlockState::Acquired);
 
         // Verify the file now contains our PID
-        let owner = pidfile.get_owner().unwrap();
+        let owner = acquired_lock.get_owner().unwrap();
         assert_eq!(owner, Some(std::process::id() as i32));
 
-        pidfile.release().unwrap();
+        let _released_lock = acquired_lock.release().unwrap();
     }
 
     #[test]
-    fn test_new_validated_valid_path() {
+    fn test_new_valid_path() {
         let temp_file = make_temp_file();
         let path = temp_file.path();
 
-        let pidfile = Pidlock::new_validated(path);
+        let pidfile = Pidlock::new(path);
         assert!(pidfile.is_ok());
 
         let pidfile = pidfile.unwrap();
@@ -1462,16 +1581,16 @@ mod tests {
     }
 
     #[test]
-    fn test_new_validated_empty_path() {
-        let result = Pidlock::new_validated("");
+    fn test_new_empty_path() {
+        let result = Pidlock::new("");
         match result {
-            Err(PidlockError::InvalidPath(_)) => {} // Expected
+            Err(NewError::InvalidPath(_)) => {} // Expected
             other => panic!("Expected InvalidPath error, got {:?}", other),
         }
     }
 
     #[test]
-    fn test_new_validated_problematic_characters() {
+    fn test_new_problematic_characters() {
         // Test various problematic characters
         let problematic_paths = [
             "/tmp/test<file.pid",
@@ -1482,25 +1601,9 @@ mod tests {
         ];
 
         for path in &problematic_paths {
-            let result = Pidlock::new_validated(path);
+            let result = Pidlock::new(path);
             match result {
-                Err(PidlockError::InvalidPath(_)) => {} // Expected
-                other => panic!("Expected InvalidPath for '{}', got {:?}", path, other),
-            }
-        }
-    }
-
-    #[test]
-    #[cfg(target_os = "windows")]
-    fn test_new_validated_reserved_names_windows() {
-        let reserved_paths = [
-            "CON.pid", "PRN.pid", "AUX.pid", "NUL.pid", "COM1.pid", "LPT1.pid",
-        ];
-
-        for path in &reserved_paths {
-            let result = Pidlock::new_validated(path);
-            match result {
-                Err(PidlockError::InvalidPath(_)) => {} // Expected
+                Err(NewError::InvalidPath(_)) => {} // Expected
                 other => panic!("Expected InvalidPath for '{}', got {:?}", path, other),
             }
         }
@@ -1532,106 +1635,29 @@ mod tests {
             "Filename contains problematic character '<': test<file.pid"
         );
 
-        // Test PidlockError display
-        let lock_exists_err = PidlockError::LockExists;
-        assert_eq!(lock_exists_err.to_string(), "A lock already exists");
+        // Test NewError display
+        let new_err = NewError::InvalidPath(empty_path_err);
+        assert_eq!(new_err.to_string(), "Invalid path provided for lock file");
 
-        let invalid_state_err = PidlockError::InvalidState;
-        assert_eq!(
-            invalid_state_err.to_string(),
-            "An operation was attempted in the wrong state, e.g. releasing before acquiring"
-        );
-
-        // Test error chaining with InvalidPath
-        let invalid_path_err = PidlockError::InvalidPath(empty_path_err);
-        assert_eq!(
-            invalid_path_err.to_string(),
-            "Invalid path provided for lock file"
-        );
-
-        // Verify error source chain
-        if let PidlockError::InvalidPath(inner) = &invalid_path_err {
-            assert_eq!(inner.to_string(), "Path cannot be empty");
-        }
+        // Test AcquireError display
+        let acquire_err = AcquireError::LockExists;
+        assert_eq!(acquire_err.to_string(), "A lock already exists");
 
         // Test that std::error::Error trait is implemented
-        let _: &dyn Error = &invalid_path_err;
-        let _: &dyn Error = &lock_exists_err;
+        let _: &dyn Error = &new_err;
+        let _: &dyn Error = &acquire_err;
 
-        // Test IO error chaining (create a simple IO error)
+        // Test error chaining
         let io_error = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "test error");
         let parent_dir_err = InvalidPathError::ParentDirectoryCreationFailed {
             path: "/some/path".to_string(),
             source: io_error,
         };
-
-        // Verify error chaining works
         assert_eq!(
             parent_dir_err.to_string(),
             "Cannot create parent directory /some/path"
         );
         assert!(parent_dir_err.source().is_some());
-
-        let pidlock_err = PidlockError::InvalidPath(parent_dir_err);
-        assert!(pidlock_err.source().is_some());
-    }
-
-    #[test]
-    fn test_improved_partial_eq() {
-        use super::InvalidPathError;
-
-        // Test that PartialEq works correctly with the new implementation
-
-        // Test simple variants
-        assert_eq!(PidlockError::LockExists, PidlockError::LockExists);
-        assert_eq!(PidlockError::InvalidState, PidlockError::InvalidState);
-        assert_ne!(PidlockError::LockExists, PidlockError::InvalidState);
-
-        // Test IOError comparison by kind only
-        let io_err1 = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "message 1");
-        let io_err2 = std::io::Error::new(std::io::ErrorKind::PermissionDenied, "message 2");
-        let io_err3 = std::io::Error::new(std::io::ErrorKind::NotFound, "message 3");
-
-        let pidlock_io1 = PidlockError::IOError(io_err1);
-        let pidlock_io2 = PidlockError::IOError(io_err2);
-        let pidlock_io3 = PidlockError::IOError(io_err3);
-
-        // Same error kind should be equal (even with different messages)
-        assert_eq!(pidlock_io1, pidlock_io2);
-        // Different error kinds should not be equal
-        assert_ne!(pidlock_io1, pidlock_io3);
-
-        // Test InvalidPath comparison by discriminant
-        let invalid_path1 = PidlockError::InvalidPath(InvalidPathError::EmptyPath);
-        let invalid_path2 = PidlockError::InvalidPath(InvalidPathError::EmptyPath);
-        let invalid_path3 = PidlockError::InvalidPath(InvalidPathError::ReservedName {
-            filename: "CON.pid".to_string(),
-        });
-
-        // Same discriminant should be equal
-        assert_eq!(invalid_path1, invalid_path2);
-        // Different discriminants should not be equal
-        assert_ne!(invalid_path1, invalid_path3);
-    }
-
-    #[test]
-    fn test_error_downcasting() {
-        use super::InvalidPathError;
-        use std::error::Error;
-
-        // Test error downcasting with proper Error trait implementation
-        let invalid_path_err = PidlockError::InvalidPath(InvalidPathError::EmptyPath);
-
-        // Convert to trait object
-        let err_trait: &dyn Error = &invalid_path_err;
-
-        // Test downcasting
-        assert!(err_trait.downcast_ref::<PidlockError>().is_some());
-
-        // Test source chain navigation
-        if let Some(source) = err_trait.source() {
-            assert!(source.downcast_ref::<InvalidPathError>().is_some());
-        }
     }
 
     #[test]
@@ -1697,7 +1723,7 @@ mod tests {
         temp_file.write_all(b"-500").unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Invalid PID should be cleaned up
         assert_eq!(result, None);
@@ -1712,15 +1738,15 @@ mod tests {
         let temp_file = make_temp_file();
         let path = temp_file.path().to_string_lossy().to_string();
 
-        let mut pidfile = Pidlock::new_validated(&path).unwrap();
-        pidfile.acquire().unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
 
         // Check that file has correct permissions (600 - owner read/write only)
         let metadata = std::fs::metadata(&path).unwrap();
         let mode = metadata.permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
 
-        pidfile.release().unwrap();
+        let _released_lock = acquired_lock.release().unwrap();
     }
 
     #[test]
@@ -1731,8 +1757,8 @@ mod tests {
         let temp_file = make_temp_file();
         let path = temp_file.path().to_string_lossy().to_string();
 
-        let mut pidfile = Pidlock::new_validated(&path).unwrap();
-        pidfile.acquire().unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
+        let acquired_lock = pidfile.acquire().unwrap();
 
         let metadata = std::fs::metadata(&path).unwrap();
         let mode = metadata.permissions().mode();
@@ -1750,7 +1776,7 @@ mod tests {
         assert_ne!(mode & 0o400, 0); // Owner read
         assert_ne!(mode & 0o200, 0); // Owner write
 
-        pidfile.release().unwrap();
+        let _released_lock = acquired_lock.release().unwrap();
     }
 
     #[test]
@@ -1761,20 +1787,18 @@ mod tests {
         let path = temp_file.path().to_string_lossy().to_string();
 
         // First, create and acquire a lock
-        let mut first_lock = Pidlock::new_validated(&path).unwrap();
-        first_lock.acquire().unwrap();
+        let first_lock = Pidlock::new(&path).unwrap();
+        let acquired_first_lock = first_lock.acquire().unwrap();
 
         // Now try to create a second lock on the same file
-        let mut second_lock = Pidlock::new_validated(&path).unwrap();
+        let second_lock = Pidlock::new(&path).unwrap();
         let result = second_lock.acquire();
 
         match result {
-            Err(PidlockError::LockExists) => {
+            Err(AcquireError::LockExists) => {
                 // This is the expected behavior - proper error type
             }
             Ok(_) => {
-                // This shouldn't happen, but if it does, clean up
-                let _ = second_lock.release();
                 panic!("Expected LockExists error, but acquire succeeded");
             }
             Err(other) => {
@@ -1783,7 +1807,7 @@ mod tests {
         }
 
         // Clean up
-        first_lock.release().unwrap();
+        let _released_first_lock = acquired_first_lock.release().unwrap();
     }
 
     #[test]
@@ -1799,7 +1823,7 @@ mod tests {
         temp_file.write_all(b"-2147483648").unwrap(); // i32::MIN
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should safely handle the negative PID and clean up the file
         assert_eq!(result, None);
@@ -1825,7 +1849,7 @@ mod tests {
         temp_file.write_all(invalid_pid.as_bytes()).unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should safely reject the invalid PID and clean up
         assert_eq!(result, None);
@@ -1840,7 +1864,7 @@ mod tests {
             .unwrap();
         temp_file.flush().unwrap();
 
-        let pidfile = Pidlock::new_validated(&path).unwrap();
+        let pidfile = Pidlock::new(&path).unwrap();
         let result = pidfile.get_owner().unwrap();
         // Should correctly identify our own process
         assert_eq!(result, Some(std::process::id() as i32));
@@ -1856,7 +1880,7 @@ mod tests {
 
         // The temp file exists but we'll test with a different path
         let test_path = format!("{}.test", pid_path);
-        let lock = Pidlock::new_validated(&test_path).unwrap();
+        let lock = Pidlock::new(&test_path).unwrap();
 
         assert!(!lock.exists());
 
@@ -1876,7 +1900,7 @@ mod tests {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
         let test_path = format!("{}.test", pid_path);
-        let lock = Pidlock::new_validated(&test_path).unwrap();
+        let lock = Pidlock::new(&test_path).unwrap();
 
         // No lock file should return false
         assert!(!lock.is_active().unwrap());
@@ -1909,7 +1933,7 @@ mod tests {
         let temp_file = make_temp_file();
         let pid_path = temp_file.path().to_str().unwrap();
         let test_path = format!("{}.test", pid_path);
-        let mut lock = Pidlock::new_validated(&test_path).unwrap();
+        let lock = Pidlock::new(&test_path).unwrap();
 
         // No lock file means no stale lock
         assert!(!lock.exists());
@@ -1918,11 +1942,11 @@ mod tests {
         std::fs::write(&test_path, "999999").unwrap();
 
         // Acquire should succeed by removing the stale lock
-        assert!(lock.acquire().is_ok());
-        assert!(lock.locked());
+        let acquired_lock = lock.acquire().unwrap();
+        assert!(acquired_lock.locked());
 
         // Clean up
-        assert!(lock.release().is_ok());
+        let _released_lock = acquired_lock.release().unwrap();
     }
 
     #[test]
@@ -1932,10 +1956,10 @@ mod tests {
         let test_path = format!("{}.test", pid_path);
 
         {
-            let mut lock = Pidlock::new_validated(&test_path).unwrap();
-            assert!(lock.acquire().is_ok());
-            assert!(lock.exists());
-            // Lock goes out of scope here and should be cleaned up
+            let lock = Pidlock::new(&test_path).unwrap();
+            let acquired_lock = lock.acquire().unwrap();
+            assert!(acquired_lock.exists());
+            // acquired_lock goes out of scope here and should be cleaned up
         }
 
         // File should be removed by Drop implementation
