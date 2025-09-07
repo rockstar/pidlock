@@ -1,3 +1,104 @@
+//! # pidlock
+//!
+//! A library for creating and managing PID-based file locks, providing a simple and reliable
+//! way to ensure only one instance of a program runs at a time.
+//!
+//! ## Features
+//!
+//! - **Cross-platform**: Works on Unix-like systems and Windows
+//! - **Stale lock detection**: Automatically detects and cleans up locks from dead processes
+//! - **Path validation**: Ensures lock file paths are valid across platforms
+//! - **Safe cleanup**: Automatically releases locks when the `Pidlock` is dropped
+//! - **Comprehensive error handling**: Detailed error types for different failure scenarios
+//!
+//! ## Quick Start
+//!
+//! ```rust
+//! use pidlock::Pidlock;
+//! use std::path::Path;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Create a new lock (use a proper path in real code)
+//! let mut lock = Pidlock::new_validated("/tmp/my_app.pid")?;
+//!
+//! // Try to acquire the lock
+//! match lock.acquire() {
+//!     Ok(()) => {
+//!         println!("Lock acquired successfully!");
+//!         
+//!         // Do your work here...
+//!         
+//!         // Explicitly release the lock (optional - it's auto-released on drop)
+//!         lock.release()?;
+//!     }
+//!     Err(pidlock::PidlockError::LockExists) => {
+//!         println!("Another instance is already running");
+//!     }
+//!     Err(e) => {
+//!         eprintln!("Failed to acquire lock: {}", e);
+//!     }
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Advanced Usage
+//!
+//! ### Checking Lock Status Without Acquiring
+//!
+//! ```rust
+//! use pidlock::Pidlock;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let lock = Pidlock::new_validated("/tmp/my_app.pid")?;
+//!
+//! // Check if a lock file exists
+//! if lock.exists() {
+//!     // Check if the lock is held by an active process
+//!     match lock.is_active()? {
+//!         true => println!("Lock is held by an active process"),
+//!         false => println!("Lock file exists but process is dead (stale lock)"),
+//!     }
+//! } else {
+//!     println!("No lock file exists");
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ### Error Handling
+//!
+//! ```rust
+//! use pidlock::{Pidlock, PidlockError, InvalidPathError};
+//!
+//! # fn main() {
+//! let result = Pidlock::new_validated("invalid<path>");
+//! match result {
+//!     Ok(_) => println!("Path is valid"),
+//!     Err(PidlockError::InvalidPath(InvalidPathError::ProblematicCharacter { character, filename })) => {
+//!         println!("Invalid character '{}' in filename: {}", character, filename);
+//!     }
+//!     Err(e) => println!("Other error: {}", e),
+//! }
+//! # }
+//! ```
+//!
+//! ## Platform Considerations
+//!
+//! - **Unix/Linux**: Uses POSIX signals for process detection, respects umask for permissions
+//! - **Windows**: Uses Win32 APIs for process detection, handles reserved filenames
+//! - **File permissions**: Lock files are created with restrictive permissions (600 on Unix)
+//! - **Path validation**: Automatically validates paths for cross-platform compatibility
+//!
+//! ## Safety
+//!
+//! This library uses unsafe code for platform-specific process detection, but all unsafe
+//! operations are carefully validated and documented. The library ensures that:
+//!
+//! - PID values are validated before use in system calls
+//! - Windows handles are properly managed and cleaned up
+//! - Unix signals are used safely without affecting target processes
+
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::{fs, process};
@@ -7,7 +108,24 @@ use thiserror::Error;
 #[cfg(feature = "log")]
 use log::warn;
 
-/// Specific types of path validation errors
+/// Specific types of path validation errors.
+///
+/// These errors occur when the provided path for a lock file is not suitable
+/// for cross-platform use or contains problematic characters.
+///
+/// # Examples
+///
+/// ```rust
+/// use pidlock::{Pidlock, PidlockError, InvalidPathError};
+///
+/// // Example of catching specific path validation errors
+/// match Pidlock::new_validated("") {
+///     Err(PidlockError::InvalidPath(InvalidPathError::EmptyPath)) => {
+///         println!("Path cannot be empty");
+///     }
+///     _ => {}
+/// }
+/// ```
 #[derive(Debug, Error)]
 pub enum InvalidPathError {
     #[error("Path cannot be empty")]
@@ -31,6 +149,38 @@ pub enum InvalidPathError {
 }
 
 /// Errors that may occur during the `Pidlock` lifetime.
+///
+/// This enum covers all possible error conditions that can occur when working
+/// with pidlocks, from path validation to I/O errors during lock operations.
+///
+/// # Examples
+///
+/// ```rust
+/// use pidlock::{Pidlock, PidlockError};
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let temp_dir = std::env::temp_dir();
+/// let lock_path = temp_dir.join("error_example.pid");
+/// let mut lock = Pidlock::new_validated(&lock_path)?;
+///
+/// match lock.acquire() {
+///     Ok(()) => {
+///         println!("Lock acquired successfully");
+///         lock.release()?;
+///     }
+///     Err(PidlockError::LockExists) => {
+///         println!("Another process is holding the lock");
+///     }
+///     Err(PidlockError::InvalidState) => {
+///         println!("Lock is in wrong state for this operation");
+///     }
+///     Err(e) => {
+///         println!("Other error: {}", e);
+///     }
+/// }
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum PidlockError {
@@ -280,6 +430,89 @@ fn process_exists(pid: i32) -> bool {
 
 /// A pid-centered lock. A lock is considered "acquired" when a file exists on disk
 /// at the path specified, containing the process id of the locking process.
+///
+/// ## Examples
+///
+/// ### Basic Usage
+///
+/// ```rust
+/// use pidlock::Pidlock;
+/// use std::fs;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// // Create a lock in a temporary location
+/// let temp_dir = std::env::temp_dir();
+/// let lock_path = temp_dir.join("example.pid");
+///
+/// let mut lock = Pidlock::new_validated(&lock_path)?;
+///
+/// // Acquire the lock
+/// lock.acquire()?;
+/// assert!(lock.locked());
+///
+/// // The lock file now exists and contains our PID
+/// assert!(lock.exists());
+///
+/// // Release the lock
+/// lock.release()?;
+/// assert!(!lock.locked());
+/// assert!(!lock.exists()); // File is removed
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Handling Lock Conflicts
+///
+/// ```rust
+/// use pidlock::{Pidlock, PidlockError};
+/// use std::fs;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let temp_dir = std::env::temp_dir();
+/// let lock_path = temp_dir.join("conflict_example.pid");
+///
+/// // First lock
+/// let mut lock1 = Pidlock::new_validated(&lock_path)?;
+/// lock1.acquire()?;
+///
+/// // Try to acquire the same lock from another instance
+/// let mut lock2 = Pidlock::new_validated(&lock_path)?;
+/// match lock2.acquire() {
+///     Err(PidlockError::LockExists) => {
+///         println!("Lock is already held by another process");
+///         // This is expected behavior
+///     }
+///     _ => panic!("Should have failed with LockExists"),
+/// }
+///
+/// // Clean up
+/// lock1.release()?;
+/// # Ok(())
+/// # }
+/// ```
+///
+/// ### Automatic Cleanup on Drop
+///
+/// ```rust
+/// use pidlock::Pidlock;
+/// use std::fs;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let temp_dir = std::env::temp_dir();
+/// let lock_path = temp_dir.join("drop_example.pid");
+///
+/// {
+///     let mut lock = Pidlock::new_validated(&lock_path)?;
+///     lock.acquire()?;
+///     assert!(lock.exists());
+///     // Lock goes out of scope here and is automatically cleaned up
+/// }
+///
+/// // Lock file should be removed by the Drop implementation
+/// assert!(!lock_path.exists());
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug)]
 pub struct Pidlock {
     #[doc = "The current process id"]
@@ -308,6 +541,49 @@ impl Pidlock {
     }
 
     /// Create a new Pidlock at the provided path with path validation.
+    ///
+    /// This is the recommended way to create a `Pidlock` as it validates the path
+    /// for cross-platform compatibility and common issues.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - The path where the lock file will be created. The parent directory
+    ///   must exist or be creatable.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Pidlock)` - A new pidlock instance ready to be acquired
+    /// * `Err(PidlockError::InvalidPath)` - If the path is not suitable for use as a lock file
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pidlock::Pidlock;
+    /// use std::env;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// // Valid path
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("valid.pid");
+    /// let lock = Pidlock::new_validated(&lock_path)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// ```rust
+    /// use pidlock::{Pidlock, PidlockError, InvalidPathError};
+    ///
+    /// # fn main() {
+    /// // Invalid path with problematic characters
+    /// let result = Pidlock::new_validated("invalid<file.pid");
+    /// match result {
+    ///     Err(PidlockError::InvalidPath(InvalidPathError::ProblematicCharacter { .. })) => {
+    ///         // Expected error for invalid characters
+    ///     }
+    ///     _ => panic!("Should have failed with InvalidPath"),
+    /// }
+    /// # }
+    /// ```
     ///
     /// # Errors
     ///
@@ -352,6 +628,53 @@ impl Pidlock {
     }
 
     /// Acquire a lock.
+    ///
+    /// This method attempts to create the lock file containing the current process ID.
+    /// If a stale lock file exists (from a dead process), it will be automatically cleaned up.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Lock was successfully acquired
+    /// * `Err(PidlockError::LockExists)` - Another active process holds the lock
+    /// * `Err(PidlockError::InvalidState)` - Lock is already acquired or released
+    /// * `Err(PidlockError::IOError)` - File system error occurred
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pidlock::{Pidlock, PidlockError};
+    /// use std::env;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("acquire_example.pid");
+    ///
+    /// let mut lock = Pidlock::new_validated(&lock_path)?;
+    ///
+    /// match lock.acquire() {
+    ///     Ok(()) => {
+    ///         println!("Lock acquired successfully!");
+    ///         // Do your work here...
+    ///         lock.release()?;
+    ///     }
+    ///     Err(PidlockError::LockExists) => {
+    ///         println!("Another instance is already running");
+    ///     }
+    ///     Err(e) => {
+    ///         eprintln!("Unexpected error: {}", e);
+    ///     }
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Behavior
+    ///
+    /// 1. **State validation**: Can only be called on a `New` pidlock
+    /// 2. **Stale lock cleanup**: Automatically removes locks from dead processes
+    /// 3. **Atomic creation**: Uses `O_EXCL`/`CREATE_NEW` for atomic lock file creation
+    /// 4. **Secure permissions**: Creates files with restrictive permissions (600 on Unix)
+    /// 5. **Reliable writes**: Flushes data to disk before returning success
     pub fn acquire(&mut self) -> PidlockResult {
         match self.state {
             PidlockState::New => {}
@@ -398,6 +721,45 @@ impl Pidlock {
     }
 
     /// Returns true when the lock is in an acquired state.
+    ///
+    /// This is a local state check only - it tells you whether this `Pidlock` instance
+    /// has successfully acquired a lock, but doesn't check if the lock file still exists
+    /// on disk or if another process might have interfered with it.
+    ///
+    /// # Returns
+    ///
+    /// `true` if this `Pidlock` instance has acquired the lock, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pidlock::Pidlock;
+    /// use std::env;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("locked_example.pid");
+    ///
+    /// let mut lock = Pidlock::new_validated(&lock_path)?;
+    ///
+    /// // Initially not locked
+    /// assert!(!lock.locked());
+    ///
+    /// // After acquiring
+    /// lock.acquire()?;
+    /// assert!(lock.locked());
+    ///
+    /// // After releasing
+    /// lock.release()?;
+    /// assert!(!lock.locked());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// For checking if a lock file exists on disk, use [`exists()`](Self::exists).
+    /// For checking if a lock is held by an active process, use [`is_active()`](Self::is_active).
     pub fn locked(&self) -> bool {
         self.state == PidlockState::Acquired
     }
@@ -413,12 +775,25 @@ impl Pidlock {
     ///
     /// ```
     /// use pidlock::Pidlock;
-    /// use std::path::Path;
+    /// use std::env;
     ///
-    /// let lock = Pidlock::new("/tmp/example.pid");
-    /// if lock.exists() {
-    ///     println!("Lock file already exists");
-    /// }
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("exists_example.pid");
+    ///
+    /// let lock = Pidlock::new_validated(&lock_path)?;
+    ///
+    /// // Initially, no lock file exists
+    /// assert!(!lock.exists());
+    ///
+    /// // Create a lock file manually to test
+    /// std::fs::write(&lock_path, "12345")?;
+    /// assert!(lock.exists());
+    ///
+    /// // Clean up
+    /// std::fs::remove_file(&lock_path)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn exists(&self) -> bool {
         self.path.exists()
@@ -437,14 +812,27 @@ impl Pidlock {
     ///
     /// ```
     /// use pidlock::Pidlock;
-    /// use std::path::Path;
+    /// use std::env;
     ///
-    /// let lock = Pidlock::new("/tmp/example.pid");
-    /// match lock.is_active() {
-    ///     Ok(true) => println!("Lock is held by an active process"),
-    ///     Ok(false) => println!("No active lock found"),
-    ///     Err(e) => println!("Error checking lock: {}", e),
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("is_active_example.pid");
+    ///
+    /// let lock = Pidlock::new_validated(&lock_path)?;
+    ///
+    /// match lock.is_active()? {
+    ///     true => println!("Lock is held by an active process"),
+    ///     false => println!("No active lock found"),
     /// }
+    ///
+    /// // Test with our own process
+    /// std::fs::write(&lock_path, std::process::id().to_string())?;
+    /// assert!(lock.is_active()?); // Our process is definitely active
+    ///
+    /// // Clean up
+    /// std::fs::remove_file(&lock_path)?;
+    /// # Ok(())
+    /// # }
     /// ```
     pub fn is_active(&self) -> Result<bool, PidlockError> {
         if !self.path.exists() {
@@ -458,6 +846,44 @@ impl Pidlock {
     }
 
     /// Release the lock.
+    ///
+    /// This method removes the lock file from disk and transitions the lock to the `Released` state.
+    /// Once released, the lock cannot be re-acquired (create a new `Pidlock` instance instead).
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Lock was successfully released
+    /// * `Err(PidlockError::InvalidState)` - Lock is not currently acquired
+    /// * `Err(PidlockError::IOError)` - File system error occurred during removal
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pidlock::Pidlock;
+    /// use std::env;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("release_example.pid");
+    ///
+    /// let mut lock = Pidlock::new_validated(&lock_path)?;
+    /// lock.acquire()?;
+    ///
+    /// // Explicitly release the lock
+    /// lock.release()?;
+    ///
+    /// // Lock file should be gone
+    /// assert!(!lock.exists());
+    /// assert!(!lock.locked());
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// Releasing a lock is optional - the `Drop` implementation will automatically
+    /// clean up acquired locks when the `Pidlock` goes out of scope. However, explicit
+    /// release is recommended for better error handling and immediate cleanup.
     pub fn release(&mut self) -> PidlockResult {
         match self.state {
             PidlockState::Acquired => {}
@@ -472,8 +898,52 @@ impl Pidlock {
         Ok(())
     }
 
-    /// Gets the owner of this lockfile, returning the pid. If the lock file doesn't exist,
-    /// or the specified pid is not a valid process id on the system, it clears it.
+    /// Gets the owner of this lockfile, returning the PID if it exists and is valid.
+    ///
+    /// This method reads the lock file and attempts to parse the PID contained within.
+    /// If the PID is invalid, the process no longer exists, or the file is corrupted,
+    /// the lock file will be automatically cleaned up.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(Some(pid))` - Lock file exists and contains a valid PID for an active process
+    /// * `Ok(None)` - No lock file exists, or the lock file was invalid and cleaned up
+    /// * `Err(_)` - I/O error occurred while reading or cleaning up the file
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use pidlock::Pidlock;
+    /// use std::env;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let temp_dir = env::temp_dir();
+    /// let lock_path = temp_dir.join("owner_example.pid");
+    ///
+    /// let mut lock = Pidlock::new_validated(&lock_path)?;
+    ///
+    /// // No owner initially
+    /// assert_eq!(lock.get_owner()?, None);
+    ///
+    /// // After acquiring, we should be the owner
+    /// lock.acquire()?;
+    /// if let Some(owner_pid) = lock.get_owner()? {
+    ///     println!("Lock is owned by PID: {}", owner_pid);
+    ///     assert_eq!(owner_pid, std::process::id() as i32);
+    /// }
+    ///
+    /// lock.release()?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Behavior
+    ///
+    /// This method will automatically clean up lock files in the following cases:
+    /// - File contains non-numeric content
+    /// - File contains a PID that doesn't correspond to a running process
+    /// - File contains a PID outside the valid range for the platform
+    /// - File is empty or contains only whitespace
     pub fn get_owner(&self) -> Result<Option<i32>, PidlockError> {
         let mut file = match fs::OpenOptions::new().read(true).open(&self.path) {
             Ok(file) => file,
