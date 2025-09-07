@@ -23,6 +23,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "example_program".to_string());
 
     // Create lock file in system temp directory
+    // NOTE: In production, consider using /var/run or /run/lock/ on Linux systems.
     let temp_dir = env::temp_dir();
     let lock_path = temp_dir.join(format!("{}.pid", program_name));
 

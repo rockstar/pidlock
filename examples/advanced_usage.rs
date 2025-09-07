@@ -188,6 +188,8 @@ fn simulate_work() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn get_lock_path() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    // NOTE: This example uses temp_dir() for portability and safety.
+    // In production, consider using /var/run or /run/lock/ on Linux systems.
     let temp_dir = env::temp_dir();
     let timestamp = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
 

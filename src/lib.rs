@@ -18,8 +18,9 @@
 //! use std::path::Path;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create a new lock (use a proper path in real code)
-//! let mut lock = Pidlock::new_validated("/tmp/my_app.pid")?;
+//! let temp_dir = std::env::temp_dir();
+//! let lock_path = temp_dir.join("my_app.pid");
+//! let mut lock = Pidlock::new_validated(&lock_path)?;
 //!
 //! // Try to acquire the lock
 //! match lock.acquire() {
@@ -30,6 +31,7 @@
 //!         
 //!         // Explicitly release the lock (optional - it's auto-released on drop)
 //!         lock.release()?;
+//!         println!("Lock released successfully!");
 //!     }
 //!     Err(pidlock::PidlockError::LockExists) => {
 //!         println!("Another instance is already running");
@@ -50,7 +52,9 @@
 //! use pidlock::Pidlock;
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let lock = Pidlock::new_validated("/tmp/my_app.pid")?;
+//! let temp_dir = std::env::temp_dir();
+//! let lock_path = temp_dir.join("example.pid");
+//! let lock = Pidlock::new_validated(&lock_path)?;
 //!
 //! // Check if a lock file exists
 //! if lock.exists() {
@@ -89,6 +93,8 @@
 //! - **Windows**: Uses Win32 APIs for process detection, handles reserved filenames
 //! - **File permissions**: Lock files are created with restrictive permissions (600 on Unix)
 //! - **Path validation**: Automatically validates paths for cross-platform compatibility
+//! - **Lock file locations**: Use `/run/lock/` on Linux, `/var/run/` on other Unix systems,
+//!   or appropriate system directories. Avoid `/tmp` for production use.
 //!
 //! ## Safety
 //!
