@@ -327,8 +327,28 @@ impl Pidlock {
 
     /// Check whether a lock file already exists, and if it does, whether the
     /// specified pid is still a valid process id on the system.
-    fn check_stale(&self) {
-        let _ = self.get_owner();
+    /// Returns true if the lock exists but the process is no longer running.
+    fn check_stale(&self) -> bool {
+        // First check if the lock file even exists
+        if !self.path.exists() {
+            return false;
+        }
+
+        // Try to get the owner PID - if this fails, we can't determine if it's stale
+        match self.get_owner() {
+            Ok(Some(pid)) => {
+                // We have a valid PID, check if the process is still running
+                !process_exists(pid)
+            }
+            Ok(None) => {
+                // No PID found in file, consider it stale
+                true
+            }
+            Err(_) => {
+                // Error reading the file, can't determine staleness safely
+                false
+            }
+        }
     }
 
     /// Acquire a lock.
@@ -339,7 +359,12 @@ impl Pidlock {
                 return Err(PidlockError::InvalidState);
             }
         }
-        self.check_stale();
+
+        // Check if there's a stale lock that we can remove
+        if self.check_stale() {
+            // Lock exists but process is dead, remove the stale lock file
+            let _ = fs::remove_file(&self.path);
+        }
 
         // Create file with appropriate permissions
         let mut options = fs::OpenOptions::new();
@@ -375,6 +400,61 @@ impl Pidlock {
     /// Returns true when the lock is in an acquired state.
     pub fn locked(&self) -> bool {
         self.state == PidlockState::Acquired
+    }
+
+    /// Check if the lock file exists on disk.
+    /// This is a read-only operation that doesn't modify the lock state.
+    ///
+    /// # Returns
+    ///
+    /// `true` if the lock file exists, `false` otherwise.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pidlock::Pidlock;
+    /// use std::path::Path;
+    ///
+    /// let lock = Pidlock::new("/tmp/example.pid");
+    /// if lock.exists() {
+    ///     println!("Lock file already exists");
+    /// }
+    /// ```
+    pub fn exists(&self) -> bool {
+        self.path.exists()
+    }
+
+    /// Check if the lock file exists and if so, whether it's stale (owned by a dead process).
+    /// This is a read-only operation that doesn't modify the lock state.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(true)` if a lock exists and the owning process is still running,
+    /// `Ok(false)` if no lock exists or the lock is stale,
+    /// `Err(_)` if there was an error determining the lock status.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use pidlock::Pidlock;
+    /// use std::path::Path;
+    ///
+    /// let lock = Pidlock::new("/tmp/example.pid");
+    /// match lock.is_active() {
+    ///     Ok(true) => println!("Lock is held by an active process"),
+    ///     Ok(false) => println!("No active lock found"),
+    ///     Err(e) => println!("Error checking lock: {}", e),
+    /// }
+    /// ```
+    pub fn is_active(&self) -> Result<bool, PidlockError> {
+        if !self.path.exists() {
+            return Ok(false);
+        }
+
+        match self.get_owner()? {
+            Some(pid) => Ok(process_exists(pid)),
+            None => Ok(false), // No PID in file means inactive
+        }
     }
 
     /// Release the lock.
@@ -441,12 +521,34 @@ impl Drop for Pidlock {
     /// Automatically release the lock when the Pidlock goes out of scope.
     /// This ensures that lock files are cleaned up even if the process panics
     /// or exits unexpectedly while holding a lock.
+    ///
+    /// Note: This implementation uses a best-effort approach. If cleanup fails,
+    /// we don't panic because that could mask the original panic that triggered
+    /// the drop. Errors are logged when the `log` feature is enabled.
     fn drop(&mut self) {
         if self.state == PidlockState::Acquired {
-            // We use a best-effort approach here - if cleanup fails, we don't panic
-            // because that could mask the original panic that triggered the drop.
-            // We also don't log errors here to avoid potential issues during unwinding.
-            let _ = fs::remove_file(&self.path);
+            // Best-effort cleanup - we can't return errors from Drop
+            match fs::remove_file(&self.path) {
+                Ok(()) => {
+                    #[cfg(feature = "log")]
+                    log::debug!("Successfully cleaned up lock file: {:?}", self.path);
+                }
+                Err(e) => {
+                    #[cfg(feature = "log")]
+                    log::warn!(
+                        "Failed to remove lock file {:?} during drop: {}. \
+                         This may leave a stale lock file on disk.",
+                        self.path,
+                        e
+                    );
+
+                    // Prevent unused variable warning when log feature is disabled
+                    #[cfg(not(feature = "log"))]
+                    let _ = e;
+
+                    // Silently ignore the error to avoid panicking during drop
+                }
+            }
         }
     }
 }
@@ -1218,5 +1320,98 @@ mod tests {
 
         // Clean up
         std::fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn test_exists() {
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+
+        // The temp file exists but we'll test with a different path
+        let test_path = format!("{}.test", pid_path);
+        let lock = Pidlock::new_validated(&test_path).unwrap();
+
+        assert!(!lock.exists());
+
+        // Create the file manually
+        std::fs::write(&test_path, "1234").unwrap();
+
+        // Now it should exist
+        assert!(lock.exists());
+
+        // Clean up
+        std::fs::remove_file(&test_path).unwrap();
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn test_is_active() {
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let test_path = format!("{}.test", pid_path);
+        let lock = Pidlock::new_validated(&test_path).unwrap();
+
+        // No lock file should return false
+        assert!(!lock.is_active().unwrap());
+
+        // Create lock file with our own PID
+        std::fs::write(&test_path, std::process::id().to_string()).unwrap();
+
+        // Should be active since our process is running
+        assert!(lock.is_active().unwrap());
+
+        // Create lock file with non-existent PID
+        std::fs::write(&test_path, "999999").unwrap();
+
+        // Should be inactive since PID doesn't exist
+        assert!(!lock.is_active().unwrap());
+
+        // Create lock file with invalid content
+        std::fs::write(&test_path, "invalid").unwrap();
+
+        // get_owner() will clean up invalid files and return Ok(None),
+        // so is_active() should return Ok(false), not an error
+        assert!(!lock.is_active().unwrap());
+
+        // The invalid file should have been cleaned up
+        assert!(!lock.exists());
+    }
+
+    #[test]
+    fn test_check_stale_behavior() {
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let test_path = format!("{}.test", pid_path);
+        let mut lock = Pidlock::new_validated(&test_path).unwrap();
+
+        // No lock file means no stale lock
+        assert!(!lock.exists());
+
+        // Create a stale lock with non-existent PID
+        std::fs::write(&test_path, "999999").unwrap();
+
+        // Acquire should succeed by removing the stale lock
+        assert!(lock.acquire().is_ok());
+        assert!(lock.locked());
+
+        // Clean up
+        assert!(lock.release().is_ok());
+    }
+
+    #[test]
+    fn test_drop_cleanup() {
+        let temp_file = make_temp_file();
+        let pid_path = temp_file.path().to_str().unwrap();
+        let test_path = format!("{}.test", pid_path);
+
+        {
+            let mut lock = Pidlock::new_validated(&test_path).unwrap();
+            assert!(lock.acquire().is_ok());
+            assert!(lock.exists());
+            // Lock goes out of scope here and should be cleaned up
+        }
+
+        // File should be removed by Drop implementation
+        assert!(!std::path::Path::new(&test_path).exists());
     }
 }
