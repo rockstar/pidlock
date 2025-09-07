@@ -321,9 +321,32 @@ fn validate_pid(pid: i32) -> bool {
     // Check against system-specific limits
     #[cfg(target_os = "linux")]
     {
-        // Linux typically allows PIDs up to 2^22 (4194304) by default
-        // But can be configured higher. We'll use a conservative limit.
-        pid <= 4194304
+        // Try to read the actual maximum PID from /proc/sys/kernel/pid_max
+        // If that fails, fall back to the typical default of 2^22 (4194304)
+        let max_pid = match fs::read_to_string("/proc/sys/kernel/pid_max") {
+            Ok(content) => match content.trim().parse::<i32>() {
+                Ok(parsed_max) => parsed_max,
+                Err(_parse_err) => {
+                    #[cfg(feature = "log")]
+                    warn!(
+                        "Failed to parse /proc/sys/kernel/pid_max content '{}': {}, using default 4194304",
+                        content.trim(),
+                        _parse_err
+                    );
+                    4194304
+                }
+            },
+            Err(_read_err) => {
+                #[cfg(feature = "log")]
+                warn!(
+                    "Failed to read /proc/sys/kernel/pid_max: {}, using default 4194304",
+                    _read_err
+                );
+                4194304
+            }
+        };
+
+        pid <= max_pid
     }
 
     #[cfg(target_os = "macos")]
@@ -1620,8 +1643,35 @@ mod tests {
         // Test system-specific upper bounds
         #[cfg(target_os = "linux")]
         {
-            assert!(validate_pid(4194304)); // Should be valid on Linux
-            assert!(!validate_pid(4194305)); // Should be invalid
+            // Read the actual maximum PID from /proc/sys/kernel/pid_max, or use default
+            let max_pid = std::fs::read_to_string("/proc/sys/kernel/pid_max")
+                .ok()
+                .and_then(|content| content.trim().parse::<i32>().ok())
+                .unwrap_or(4194304);
+
+            // Test that reasonable PIDs within the max are valid
+            assert!(validate_pid(1));
+            assert!(validate_pid(std::cmp::min(max_pid, 1000)));
+
+            // Test that max_pid itself is valid
+            assert!(validate_pid(max_pid));
+
+            // Test edge cases around the maximum
+            if max_pid > 1 {
+                assert!(validate_pid(max_pid - 1));
+            }
+
+            // Test that max_pid + 1 is invalid (if max_pid < i32::MAX)
+            if max_pid < i32::MAX {
+                assert!(!validate_pid(max_pid + 1));
+            }
+
+            // Test that very large values are invalid
+            assert!(!validate_pid(i32::MAX));
+
+            // Ensure the default fallback value (4194304) would be valid
+            // This helps ensure our fallback is reasonable
+            assert!(max_pid >= 4194304 || validate_pid(4194304));
         }
 
         #[cfg(target_os = "macos")]
