@@ -328,8 +328,9 @@ fn validate_pid(pid: i32) -> bool {
 
     #[cfg(target_os = "macos")]
     {
-        // macOS uses 32-bit PIDs but typically keeps them much lower
-        pid <= 99999
+        // macOS defines PID_MAX as 99999, but process IDs are not assigned
+        // to PID_MAX, so max pid is 99998.
+        pid < 99999
     }
 
     #[cfg(target_os = "windows")]
@@ -1626,8 +1627,8 @@ mod tests {
 
         #[cfg(target_os = "macos")]
         {
-            assert!(validate_pid(99999)); // Should be valid on macOS
-            assert!(!validate_pid(100000)); // Should be invalid
+            assert!(validate_pid(99998)); // Should be valid on macOS
+            assert!(!validate_pid(99999)); // Should be invalid
         }
     }
 
