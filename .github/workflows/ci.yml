@@ -21,6 +21,8 @@ jobs:
       run: cargo build --verbose --all-features --all-targets
     - name: Run tests
       run: cargo test --verbose --all-features --all-targets
+    - name: Build examples
+      run: cargo test --examples
   check:
     name: Perform various checks
     runs-on: ubuntu-latest
