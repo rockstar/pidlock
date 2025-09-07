@@ -322,7 +322,7 @@ impl Pidlock {
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o644); // rw-r--r--
+            options.mode(0o600);
         }
 
         let mut file = match options.open(&self.path) {
@@ -932,10 +932,40 @@ mod tests {
         let mut pidfile = Pidlock::new(&path);
         pidfile.acquire().unwrap();
 
-        // Check that file has correct permissions (644)
+        // Check that file has correct permissions (600 - owner read/write only)
         let metadata = std::fs::metadata(&path).unwrap();
         let mode = metadata.permissions().mode();
-        assert_eq!(mode & 0o777, 0o644);
+        assert_eq!(mode & 0o777, 0o600);
+
+        pidfile.release().unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_file_permissions_security() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp_file = make_temp_file();
+        let path = temp_file.path().to_string_lossy().to_string();
+
+        let mut pidfile = Pidlock::new(&path);
+        pidfile.acquire().unwrap();
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        let mode = metadata.permissions().mode();
+
+        // Verify the file is NOT readable by group
+        assert_eq!(mode & 0o040, 0);
+        // Verify the file is NOT readable by others
+        assert_eq!(mode & 0o004, 0);
+        // Verify the file is NOT writable by group
+        assert_eq!(mode & 0o020, 0);
+        // Verify the file is NOT writable by others
+        assert_eq!(mode & 0o002, 0);
+
+        // Verify the file IS readable and writable by owner
+        assert_ne!(mode & 0o400, 0); // Owner read
+        assert_ne!(mode & 0o200, 0); // Owner write
 
         pidfile.release().unwrap();
     }
