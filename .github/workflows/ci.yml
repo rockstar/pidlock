@@ -12,16 +12,20 @@ jobs:
     strategy:
       matrix:
         os: [Ubuntu, macOS, windows]
+    env:
+      RUSTFLAGS: "-D warnings"
 
     steps:
     - uses: actions/checkout@v3
     - name: Build
-      run: cargo build --verbose --features strict
+      run: cargo build --verbose --all-features --all-targets
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo test --verbose --all-features --all-targets
   check:
     name: Perform various checks
     runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
     steps:
     - uses: actions/checkout@v3
     - name: Install clippy, rustfmt and cargo-deny

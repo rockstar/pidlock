@@ -19,7 +19,6 @@ include = [
 
 [features]
 default = []
-strict = []  # Warnings are errors
 
 [dependencies]
 libc = "0.2.40"
