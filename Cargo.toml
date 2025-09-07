@@ -37,7 +37,7 @@ rand = "0.8.2"
 tempfile = "3.21.0"
 
 [badges]
-circle-ci = { repository = "rockstar/pidlock", branch = "master" }
+maintenance = { status = "actively-developed" }
 
 [lints.clippy]
 expect_used = { level = "deny" }
