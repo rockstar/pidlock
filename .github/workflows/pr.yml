@@ -42,7 +42,7 @@ jobs:
       with:
         command: check
   format:
-    name: Perform various checks
+    name: Check code formatting
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: "-D warnings"
