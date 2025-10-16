@@ -446,15 +446,9 @@ fn process_exists(pid: i32) -> bool {
 
     #[cfg(not(target_os = "windows"))]
     {
-        // SAFETY: libc::kill with signal 0 is safe when called with a valid PID because:
-        // - Signal 0 (null signal) performs no actual signal delivery
-        // - It only checks if the process exists and we have permission to signal it
-        // - POSIX guarantees this is a safe operation that won't affect the target process
-        // - We've already validated the PID is within reasonable bounds
-        unsafe {
-            let result = libc::kill(pid, 0);
-            result == 0
-        }
+        // We specify None as the signal, which equates to using 0 in `kill(2)`. This
+        // means no signal is sent, but error checking is still performed.
+        nix::sys::signal::kill(nix::unistd::Pid::from_raw(pid), None).is_ok()
     }
 }
 
