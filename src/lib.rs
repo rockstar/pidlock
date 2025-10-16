@@ -400,47 +400,57 @@ fn process_exists(pid: i32) -> bool {
 
     #[cfg(target_os = "windows")]
     {
-        // SAFETY: We use Windows APIs according to their documented contracts:
+        // SAFETY: The `windows` crate does not provide a completely safe interface. Rather,
+        // it provides a "more safe" interface. As such, there is no safe API for windows.
+        // We use Windows APIs according to their documented contracts:
         // - OpenProcess is called with valid flags and a validated positive PID
         // - We check return values before using handles
         // - CloseHandle is always called to prevent resource leaks
         // - GetExitCodeProcess is only called with a valid handle
         // The PID has already been validated by validate_pid() to be positive and within range
-        unsafe {
-            use windows_sys::Win32::{
-                Foundation::{CloseHandle, INVALID_HANDLE_VALUE, STILL_ACTIVE},
-                System::Threading::{GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION},
-            };
+        use windows::Win32::Foundation::{CloseHandle, HANDLE, NTSTATUS, STILL_ACTIVE};
+        use windows::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_INFORMATION,
+        };
 
-            let handle = OpenProcess(PROCESS_QUERY_INFORMATION, 0, pid as u32);
-
-            // Check if OpenProcess failed (returns 0 or INVALID_HANDLE_VALUE)
-            if handle == 0 || handle == INVALID_HANDLE_VALUE {
-                // Process doesn't exist or we don't have permission to query it
-                return false;
-            }
-
-            // Use RAII-style cleanup to ensure handle is always closed, even on panic
-            struct HandleGuard(isize);
-            impl Drop for HandleGuard {
-                fn drop(&mut self) {
-                    // SAFETY: We only create HandleGuard with valid handles from OpenProcess
-                    unsafe {
-                        CloseHandle(self.0);
-                    }
+        let handle = unsafe {
+            match OpenProcess(PROCESS_QUERY_INFORMATION, false, pid as u32) {
+                Ok(h) => h,
+                Err(_) => {
+                    // OpenProcess failed, likely due to invalid PID or insufficient permissions
+                    return false;
                 }
             }
-            let _guard = HandleGuard(handle);
+        };
 
-            let mut exit_code = 0;
-            let success = GetExitCodeProcess(handle, &mut exit_code);
+        // Check if OpenProcess failed (returns 0 or INVALID_HANDLE_VALUE)
+        if handle.is_invalid() {
+            // Process doesn't exist or we don't have permission to query it
+            return false;
+        }
 
-            // Return true only if GetExitCodeProcess succeeded AND process is still active
-            // Note: STILL_ACTIVE (259) could theoretically be a real exit code, but it's
-            // extremely unlikely in practice. This is the documented Windows API pattern
-            // for checking if a process is still running. The risk of false positives
-            // (a process that actually exited with code 259) is negligible.
-            success != 0 && exit_code as i32 == STILL_ACTIVE
+        // Use RAII-style cleanup to ensure handle is always closed, even on panic
+        struct HandleGuard(HANDLE);
+        impl Drop for HandleGuard {
+            fn drop(&mut self) {
+                let _ = unsafe { CloseHandle(self.0) };
+            }
+        }
+        let _guard = HandleGuard(handle);
+
+        let mut exit_code: u32 = 0;
+        unsafe {
+            match GetExitCodeProcess(handle, &mut exit_code) {
+                Ok(_) => {
+                    // Return true only if GetExitCodeProcess succeeded AND process is still active
+                    // Note: STILL_ACTIVE (259) could theoretically be a real exit code, but it's
+                    // extremely unlikely in practice. This is the documented Windows API pattern
+                    // for checking if a process is still running. The risk of false positives
+                    // (a process that actually exited with code 259) is negligible.
+                    NTSTATUS(exit_code as i32) == STILL_ACTIVE
+                }
+                Err(_) => false, // GetExitCodeProcess failed
+            }
         }
     }
 

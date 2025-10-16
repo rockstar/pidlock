@@ -20,7 +20,7 @@ log = { version = "0.4", optional = true }
 thiserror = "1.0"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.45.0", features = [
+windows = { version = "0.62.2", features = [
     "Win32_System_Threading",
     "Win32_Foundation",
 ] }
